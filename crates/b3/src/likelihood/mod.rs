@@ -18,6 +18,7 @@ use logger::{info, trace};
 
 mod cpu;
 mod cuda;
+mod metal;
 mod hetero;
 mod parallel;
 

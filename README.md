@@ -1,4 +1,10 @@
-# Aspartik
+# Aspartik: Metal Implementation
+
+**Project:** Coursework "Implementation of Felsenstein's phylogenetic tree likelihood algorithm using Metal"
+
+**Author:** G. N. Kraynov (HSE University, Software Engineering)
+
+*Workspace:* [`crates/b3/src/likelihood/metal/`](crates/b3/src/likelihood/metal/)
 
 Aspartik is a computational biology toolkit inspired by [BioPython] and
 [SciPy].  Its goal is to provide a suite of utilities for working with
