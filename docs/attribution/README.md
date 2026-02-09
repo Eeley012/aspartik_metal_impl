@@ -147,11 +147,6 @@ conversion attributes on pyclasses.
 Hash map which preserves insertion order, used by `petgraph`.
 
 
-### [`indoc`](./indoc-license)
-
-Macro which de-indents strings, used by `pyo3` in the `py_run` macro.
-
-
 ### [`inventory`](./inventory-license)
 
 "Distributed plugin registration", which uses platform-specific
@@ -192,12 +187,6 @@ Unified Rust `log` facade.
 ### [`memchr`](./memchr-license)
 
 SIMD-optimized string search, used by `nom` and `serde_json`.
-
-
-### [`memoffset`](./memoffset-license)
-
-Provides `offset_of`, used in `pyo3`.  It's equivalent to `std`'s
-`offset_of`, but its MSRV is lower (`std`'s is 1.77).
 
 
 ### [`num-traits`](./num-traits-license)
@@ -312,11 +301,6 @@ Currently only used in data because `stats` still supports `no_std`.
 ### [`unicode-indent`](./unicode-ident-license)
 
 Unicode-aware identifiers check, used by `serde_derive`.
-
-
-### [`unindent`](./indoc-license)
-
-Runtime version of `indoc`.
 
 
 ### [`zerocopy`](./zerocopy-license)

@@ -2,6 +2,8 @@ use anyhow::Result;
 use parking_lot::{MappedMutexGuard, MutexGuard};
 use pyo3::prelude::*;
 
+use std::io::Write;
+
 mod class_vector;
 mod real;
 mod real_vector;
@@ -15,7 +17,7 @@ pub use tree::{Internal, Leaf, Node, PyTree, Tree};
 pub trait Parameter {
 	fn is_changed(&self) -> bool;
 
-	fn dump(&self) -> Result<Vec<u8>>;
+	fn dump(&self, dst: &mut dyn Write) -> Result<()>;
 
 	fn load(&mut self, bytes: &[u8]) -> Result<()>;
 
@@ -83,20 +85,13 @@ impl<'py> IntoPyObject<'py> for PyParameter {
 	type Error = PyErr;
 
 	fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, PyErr> {
-		Ok(match self {
-			Self::ClassVector(p) => {
-				Bound::new(py, p.clone_ref(py))?.into_any()
-			}
-			Self::Real(p) => {
-				Bound::new(py, p.clone_ref(py))?.into_any()
-			}
-			Self::RealVector(p) => {
-				Bound::new(py, p.clone_ref(py))?.into_any()
-			}
-			Self::Tree(p) => {
-				Bound::new(py, p.clone_ref(py))?.into_any()
-			}
-		})
+		let any = match self {
+			Self::ClassVector(p) => p.clone_ref(py).into_any(),
+			Self::Real(p) => p.clone_ref(py).into_any(),
+			Self::RealVector(p) => p.clone_ref(py).into_any(),
+			Self::Tree(p) => p.clone_ref(py).into_any(),
+		};
+		Ok(any.into_bound(py))
 	}
 }
 

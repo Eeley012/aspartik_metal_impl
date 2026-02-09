@@ -3,11 +3,11 @@ use parking_lot::Mutex;
 use pyo3::{basic::CompareOp, exceptions::PyIndexError, prelude::*};
 use serde::{Deserialize, Serialize};
 
-use std::ops::Index;
+use std::{io::Write, ops::Index};
 
 use super::Parameter;
 use crate::impl_pyparameter_common;
-use skvec::SkVec;
+use skvec::{Iter, SkVec};
 use util::py_bail;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +30,10 @@ impl RealVector {
 	pub fn set(&mut self, index: usize, value: f64) {
 		self.values.set(index, value)
 	}
+
+	pub fn iter(&self) -> Iter<'_, f64> {
+		self.values.iter()
+	}
 }
 
 impl Index<usize> for RealVector {
@@ -45,12 +49,12 @@ impl Parameter for RealVector {
 		self.values.is_changed()
 	}
 
-	fn dump(&self) -> Result<Vec<u8>> {
-		Ok(rmp_serde::to_vec(self)?)
+	fn dump(&self, dst: &mut dyn Write) -> Result<()> {
+		Ok(verbatim::to_writer(&self, dst)?)
 	}
 
 	fn load(&mut self, bytes: &[u8]) -> Result<()> {
-		*self = rmp_serde::from_slice(bytes)?;
+		*self = verbatim::from_slice(bytes)?;
 		Ok(())
 	}
 

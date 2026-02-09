@@ -2,13 +2,11 @@ use anyhow::{Result, ensure};
 use parking_lot::{Mutex, MutexGuard};
 use pyo3::prelude::*;
 use rand::{
-	Rng as _, SeedableRng, TryRngCore,
+	RngExt, SeedableRng, TryRng,
 	distr::uniform::{UniformFloat, UniformSampler},
 	rngs::SysRng,
 };
 use rand_pcg::Pcg64;
-
-use util::py_pickle_state_impl;
 
 pub type Rng = Pcg64;
 
@@ -21,12 +19,6 @@ pub type Rng = Pcg64;
 /// It has a number of built-in methods, but it is primarily used by other
 /// Aspartik modules (for example `b3` and `stats.distributions`) as a
 /// randomness source.
-///
-///
-/// ## Pickling
-///
-/// This class supports pickling.  It can be saved and then restored without
-/// losing its internal state.
 #[derive(Debug)]
 #[pyclass(name = "RNG", module = "aspartik.rng", frozen)]
 #[repr(transparent)]
@@ -104,18 +96,16 @@ impl PyRng {
 		})
 	}
 
-	fn dump(&self) -> Result<Vec<u8>> {
-		Ok(rmp_serde::to_vec(&*self.inner())?)
+	pub fn dump(&self) -> Result<Vec<u8>> {
+		Ok(verbatim::to_vec(&*self.inner())?)
 	}
 
-	fn load(&self, bytes: &[u8]) -> Result<()> {
+	pub fn load(&self, bytes: &[u8]) -> Result<()> {
 		let inner = &mut *self.inner();
-		*inner = rmp_serde::from_slice(bytes)?;
+		*inner = verbatim::from_slice(bytes)?;
 		Ok(())
 	}
 }
-
-py_pickle_state_impl!(PyRng, _pickle_impl);
 
 #[pymodule(name = "_rng_rust_impl")]
 pub mod pymodule {

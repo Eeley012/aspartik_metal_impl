@@ -3,11 +3,11 @@ use parking_lot::Mutex;
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use std::ops::Index;
+use std::{io::Write, ops::Index};
 
 use super::Parameter;
 use crate::impl_pyparameter_common;
-use skvec::SkVec;
+use skvec::{Iter, SkVec};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassVector {
@@ -36,6 +36,10 @@ impl ClassVector {
 		assert!(class < self.num_classes);
 		self.classes.set(index, class);
 	}
+
+	pub fn iter(&self) -> Iter<'_, u8> {
+		self.classes.iter()
+	}
 }
 
 impl Parameter for ClassVector {
@@ -43,12 +47,12 @@ impl Parameter for ClassVector {
 		self.classes.is_changed()
 	}
 
-	fn dump(&self) -> Result<Vec<u8>> {
-		Ok(rmp_serde::to_vec(self)?)
+	fn dump(&self, dst: &mut dyn Write) -> Result<()> {
+		Ok(verbatim::to_writer(&self, dst)?)
 	}
 
 	fn load(&mut self, bytes: &[u8]) -> Result<()> {
-		*self = rmp_serde::from_slice(bytes)?;
+		*self = verbatim::from_slice(bytes)?;
 		Ok(())
 	}
 

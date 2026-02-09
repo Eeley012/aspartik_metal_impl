@@ -1,11 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use parking_lot::Mutex;
-use pyo3::{
-	IntoPyObjectExt,
-	prelude::*,
-	types::{PyBytes, PyList},
-};
-use rand::Rng as _;
+use pyo3::{IntoPyObjectExt, prelude::*, types::PyList};
+use rand::RngExt;
+use serde::{Deserialize, Serializer, ser::SerializeSeq};
 
 use crate::{
 	PyCallback, PyPrior,
@@ -13,8 +10,8 @@ use crate::{
 	operator::{Proposal, PyOperator, WeightedScheduler},
 	parameters::PyParameter,
 };
-use rng::PyRng;
-use util::{py_call_method, time};
+use rng::{PyRng, Rng};
+use util::time;
 
 /// The main object which runs the analysis
 #[pyclass(name = "MCMC", module = "aspartik.b3", frozen)]
@@ -67,7 +64,7 @@ impl Mcmc {
 	///
 	/// Starts from 0, includes burn-in.
 	#[getter]
-	fn current_step(&self) -> usize {
+	pub fn current_step(&self) -> usize {
 		*self.current_step.lock()
 	}
 
@@ -154,8 +151,13 @@ impl Mcmc {
 
 	/// Posterior probability for the last accepted step
 	#[getter]
-	fn posterior(&self) -> f64 {
+	pub fn posterior(&self) -> f64 {
 		*self.posterior.lock()
+	}
+
+	#[getter]
+	pub fn likelihood_value(&self) -> Result<f64> {
+		self.likelihood.likelihood()
 	}
 
 	/// Prior likelihood for the current step
@@ -164,7 +166,7 @@ impl Mcmc {
 	/// [`Likelihood`](#MCMC.Likelihood), this property isn't cached.  It
 	/// will trigger a recalculation on all priors on each access.
 	#[getter]
-	fn prior(&self, py: Python) -> Result<f64> {
+	pub fn prior(&self, py: Python) -> Result<f64> {
 		let mut out = 0.0;
 		for py_prior in &self.priors {
 			out += py_prior.probability(py)?;
@@ -189,57 +191,49 @@ impl Mcmc {
 		self.scheduler.statistics(py)
 	}
 
-	fn dump_state(&self, py: Python) -> Result<Vec<u8>> {
-		use rmp::encode;
+	fn dump_state(&self) -> Result<Vec<u8>> {
+		let mut ser = verbatim::Serializer::new(Vec::new());
+		let mut scratch = Vec::new();
 
-		let mut out = Vec::new();
+		ser.serialize_u64(*self.current_step.lock() as u64)?;
+		ser.serialize_f64(*self.posterior.lock())?;
 
-		encode::write_u64(&mut out, *self.current_step.lock() as u64)?;
-		encode::write_f64(&mut out, *self.posterior.lock())?;
-
-		encode::write_array_len(&mut out, self.state.len() as u32)?;
+		let mut seq = ser.serialize_seq(Some(self.state.len()))?;
 		for param in &self.state {
 			let param = &*param.as_ref();
-			let bytes = param.dump()?;
-
-			encode::write_bin_len(&mut out, bytes.len() as u32)?;
-			out.extend_from_slice(&bytes);
+			param.dump(&mut scratch)?;
+			seq.serialize_element(&scratch)?;
+			scratch.clear();
 		}
+		seq.end()?;
 
-		let bytes = py_call_method!(py, self.rng, "dump")?;
-		let bytes = bytes.cast_bound::<PyBytes>(py).unwrap();
-		let bytes = bytes.as_bytes();
-		encode::write_bin_len(&mut out, bytes.len() as u32)?;
-		out.extend_from_slice(bytes);
+		let bytes = self.rng.get().dump()?;
+		ser.serialize_bytes(&bytes)?;
 
-		Ok(out)
+		Ok(ser.into_inner())
 	}
 
-	fn load_state(&self, py: Python, bytes: &[u8]) -> Result<()> {
-		use rmp::decode;
+	fn load_state(&self, bytes: &[u8]) -> Result<()> {
+		#[derive(Deserialize)]
+		struct De<'a> {
+			current_step: u64,
+			posterior: f64,
+			#[serde(borrow)]
+			params: Vec<&'a [u8]>,
+			rng: Rng,
+		}
+		let mut deserializer = verbatim::Deserializer::new(bytes);
+		let de = De::deserialize(&mut deserializer)?;
 
-		let mut bytes = bytes;
+		*self.current_step.lock() = de.current_step as usize;
+		*self.posterior.lock() = de.posterior;
 
-		let current_step = decode::read_u64(&mut bytes)?;
-		*self.current_step.lock() = current_step as usize;
-
-		let posterior = decode::read_f64(&mut bytes)?;
-		*self.posterior.lock() = posterior;
-
-		let num_params = decode::read_array_len(&mut bytes)? as usize;
-		for i in 0..num_params {
-			let len = decode::read_bin_len(&mut bytes)? as usize;
-			let param_bytes = &bytes[..len];
-
+		for (i, bytes) in de.params.iter().enumerate() {
 			let param = &mut *self.state[i].as_ref();
-			param.load(param_bytes)?;
-
-			bytes = &bytes[len..];
+			param.load(bytes)?;
 		}
 
-		let len = decode::read_bin_len(&mut bytes)? as usize;
-		let rng_bytes = &bytes[..len];
-		py_call_method!(py, self.rng, "load", rng_bytes)?;
+		*self.rng.get().inner() = de.rng;
 
 		self.likelihood.propose()?;
 		self.likelihood.likelihood()?;

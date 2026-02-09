@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, Sized, SupportsFloat
 
-from ..b3 import Callback, Clock, Operator, Prior
+from ..b3 import Callback, Operator, Prior
 from ..b3.likelihoods import Likelihood
 from ..b3.parameters import Node, Parameter, Scalable
 from ..b3.substitutions import Substiution4
@@ -148,6 +148,8 @@ class MCMC:
     def rng(self) -> RNG: ...
     @property
     def posterior(self) -> float: ...
+    @property
+    def likelihood_value(self) -> float: ...
     @property
     def prior(self) -> float: ...
     @property

@@ -17,6 +17,9 @@ skvec = { workspace = true, features = ["serde"] }
 util = { workspace = true }
 
 anyhow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true, features = ["zstd"] }
+arrow-schema = { workspace = true }
 blake3 = { workspace = true }
 bytemuck = { workspace = true, features = ["extern_crate_alloc"] }
 cudarc = { workspace = true, features = ["driver", "nvrtc", "dynamic-loading", "cuda-12000", "std"] }
@@ -26,10 +29,9 @@ parking_lot = { workspace = true }
 pyo3 = { workspace = true, features = ["anyhow"] }
 rand = { workspace = true }
 rand_pcg = { workspace = true, features = ["serde"] }
-rmp = { workspace = true }
-rmp-serde = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+verbatim = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true
