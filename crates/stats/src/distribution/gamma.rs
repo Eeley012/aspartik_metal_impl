@@ -55,14 +55,12 @@ pub struct Gamma {
 #[cfg(feature = "python")]
 impl_pymethods! {for Gamma;
 	new(shape: f64, rate: f64) throws GammaError;
-	get(py_shape) shape: f64;
-	get(py_rate) rate: f64;
+	get(shape: f64 as py_shape);
+	get(rate: f64 as py_rate);
 	repr("Gamma(shape={}, rate={})", shape, rate);
-	Continuous;
-	ContinuousCDF;
-	Distribution;
-	sample;
-	pickle(shape, rate);
+	Continuous true;
+	ContinuousCDF true;
+	Distribution true;
 }
 
 /// Represents the errors that can occur when creating a [`Gamma`].
@@ -214,7 +212,7 @@ impl ContinuousCDF for Gamma {
 			return self.upper();
 		};
 
-		// Bisection search for MAX_ITERS.0 iterations
+		// Bisection search
 		let mut high = 2.0;
 		let mut low = 1.0;
 		while self.cdf(low) > p {
@@ -225,7 +223,7 @@ impl ContinuousCDF for Gamma {
 		}
 		let mut x_0 = (high + low) / 2.0;
 
-		for _ in 0..8 {
+		for _ in 0..100 {
 			if self.cdf(x_0) >= p {
 				high = x_0;
 			} else {

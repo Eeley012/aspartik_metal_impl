@@ -5,10 +5,7 @@ use pyo3::{
 	prelude::*,
 	types::{PyAny, PyType},
 };
-use rand::{
-	RngExt,
-	seq::{IteratorRandom, SliceRandom},
-};
+use rand::{RngExt, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 
 use std::{
@@ -23,7 +20,7 @@ use super::Parameter;
 use crate::impl_pyparameter_common;
 use bitmap::Bitmap;
 use data::newick::{
-	Edge as NewickEdge, Node as NewickNode, NodeIndex as NewickNodeIndex,
+	Edge as NewickEdge, Node as NewickNode, NodeIdx as NewickNodeIndex,
 	Tree as NewickTree,
 };
 use rng::{PyRng, Rng};
@@ -167,123 +164,6 @@ impl Tree {
 		Ok(out)
 	}
 
-	pub fn from_newick(newick: &NewickTree) -> Result<Self> {
-		let num_nodes = newick.num_nodes();
-		let num_internals = (num_nodes - 1) / 2;
-		let num_leaves = num_nodes.div_ceil(2);
-
-		let mut children = vec![ROOT; num_internals * 2];
-		let mut parents = vec![ROOT; num_nodes];
-		let mut heights = vec![0.0; num_nodes];
-		let mut names = Vec::with_capacity(num_leaves);
-
-		let mut current_leaf: usize = 0;
-		let mut current_internal = num_leaves;
-
-		let Some(root) = newick.root() else {
-			bail!("The Newick tree must be rooted");
-		};
-
-		let mut mapping = HashMap::<NewickNodeIndex, usize>::new();
-
-		let mut stack = Vec::from([*root]);
-
-		while let Some(node) = stack.pop() {
-			let mut children = newick.children_of(node);
-			let Some(left) = children.next() else {
-				// child
-				mapping.insert(node, current_leaf);
-				current_leaf += 1;
-				continue;
-			};
-			let Some(right) = children.next() else {
-				bail!(
-					"Encountered an internal node with only one child"
-				);
-			};
-			if children.next().is_some() {
-				bail!(
-					"Encountered an internal node with more than two children.  b3 tree must be strictly bifurcating."
-				);
-			}
-
-			mapping.insert(node, current_internal);
-			current_internal += 1;
-
-			stack.push(left);
-			stack.push(right);
-		}
-
-		stack.push(*root);
-
-		while let Some(node_idx) = stack.pop() {
-			let node = newick.get_node(node_idx);
-			let mut node_children = newick.children_of(node_idx);
-
-			let current = mapping[&node_idx];
-
-			if let Some(left) = node_children.next() {
-				// parent
-
-				// PANIC: checked when iterating over stack1
-				let right = node_children.next().unwrap();
-				stack.push(left);
-				stack.push(right);
-
-				let left = mapping[&left];
-				let right = mapping[&right];
-
-				let offset = (current - num_leaves) * 2;
-				children[offset] = left;
-				children[offset + 1] = right;
-
-				parents[left] = current;
-				parents[right] = current;
-			} else {
-				// child
-				names.push(node.name().to_owned());
-			}
-
-			// update height
-			let Some(edge_to_parent) =
-				newick.edge_to_parent(node_idx)
-			else {
-				continue; // ignore root
-			};
-
-			let Some(edge_length) = edge_to_parent.distance()
-			else {
-				bail!("Encountered an edge without length");
-			};
-
-			let parent_height = heights[parents[current]];
-			let node_height = parent_height - edge_length;
-			heights[current] = node_height;
-		}
-
-		let mut min_height: f64 = 0.0;
-		for height in heights.iter().copied() {
-			if height < min_height {
-				min_height = height;
-			}
-		}
-
-		for height in &mut heights {
-			*height -= min_height;
-		}
-
-		Ok(Self {
-			names,
-
-			children: children.into(),
-			parents: parents.into(),
-			heights: heights.into(),
-
-			updated_edges: Bitmap::new(num_nodes),
-			updated_nodes: Bitmap::new(num_nodes),
-		})
-	}
-
 	pub fn set_random_edges(&mut self, rng: &mut Rng) {
 		let num_leaves = self.num_leaves();
 		let num_internals = self.num_internals();
@@ -343,20 +223,20 @@ impl Tree {
 		let mut walk = VecDeque::new();
 		for leaf in self.leaves() {
 			// All leaves have a parent
-			let parent = self.parent_of(&leaf).unwrap();
+			let parent = self.parent_of(*leaf).unwrap();
 			walk.push_back(parent);
 		}
 		while let Some(internal) = walk.pop_front() {
-			let (left, right) = self.children_of(&internal);
+			let (left, right) = self.children_of(internal);
 			let max = f64::max(
-				self.height_of(&left),
-				self.height_of(&right),
+				self.height_of(left),
+				self.height_of(right),
 			);
 
 			let node_diff = diff * (1.0 + rng.random::<f64>());
-			self.set_height(&internal, max + node_diff);
+			self.set_height(*internal, max + node_diff);
 
-			if let Some(parent) = self.parent_of(&internal) {
+			if let Some(parent) = self.parent_of(*internal) {
 				walk.push_front(parent);
 			}
 		}
@@ -370,13 +250,13 @@ impl Tree {
 
 	pub fn scale(&mut self, scale: f64) -> Result<()> {
 		for node in self.internals() {
-			let new_height = self.height_of(&node) * scale;
-			self.set_height(&node, new_height);
+			let new_height = self.height_of(*node) * scale;
+			self.set_height(*node, new_height);
 		}
 
 		if self.has_dated_tips() && scale < 1.0 {
 			for node in self.nodes() {
-				ensure!(self.is_node_height_valid(&node));
+				ensure!(self.is_node_height_valid(node));
 			}
 		}
 
@@ -420,23 +300,23 @@ impl Tree {
 		for edge in self.edges() {
 			if self.updated_edges.at(edge) {
 				let (child, _) = self.edge_nodes(edge);
-				self.mark_node_updated(&child);
+				self.mark_node_updated(child);
 			}
 		}
 
 		// For each updated node go upwards in the tree until root and
 		// mark nodes as updated
 		for node in self.nodes() {
-			if self.is_node_updated(&node) {
+			if self.is_node_updated(node) {
 				let mut curr = node;
-				while let Some(parent) = self.parent_of(&curr) {
+				while let Some(parent) = self.parent_of(curr) {
 					// return early when we find an already
 					// visited node to avoid wasting time
 					// on already checked paths
-					if self.is_node_updated(&parent) {
+					if self.is_node_updated(*parent) {
 						break;
 					}
-					self.mark_node_updated(&parent);
+					self.mark_node_updated(*parent);
 					curr = *parent;
 				}
 			}
@@ -444,7 +324,7 @@ impl Tree {
 
 		// Updated leaves, in order
 		for leaf in self.leaves() {
-			if self.is_node_updated(&leaf) {
+			if self.is_node_updated(*leaf) {
 				nodes.push(*leaf);
 			}
 		}
@@ -454,16 +334,16 @@ impl Tree {
 		let mut internals = Vec::<Node>::from([*self.root()]);
 
 		while let Some(node) = queue.pop_front() {
-			let (left, right) = self.children_of(&node);
+			let (left, right) = self.children_of(node);
 
-			if let Some(left) = self.as_internal(&left)
-				&& self.is_node_updated(&left)
+			if self.is_node_updated(left)
+				&& let Some(left) = self.as_internal(left)
 			{
 				internals.push(*left);
 				queue.push_back(left);
 			}
-			if let Some(right) = self.as_internal(&right)
-				&& self.is_node_updated(&right)
+			if self.is_node_updated(right)
+				&& let Some(right) = self.as_internal(right)
 			{
 				internals.push(*right);
 				queue.push_back(right);
@@ -487,8 +367,8 @@ impl Tree {
 
 		for node in nodes {
 			out_nodes.push(node.0);
-			if let Some(internal) = self.as_internal(node) {
-				let (left, right) = self.children_of(&internal);
+			if let Some(internal) = self.as_internal(*node) {
+				let (left, right) = self.children_of(internal);
 				children.push((left.0, right.0));
 			}
 		}
@@ -496,19 +376,19 @@ impl Tree {
 		(out_nodes, children)
 	}
 
-	fn mark_node_updated(&mut self, node: &Node) {
+	fn mark_node_updated(&mut self, node: Node) {
 		self.updated_nodes.set_on(node.0);
 	}
 
-	fn is_node_updated(&self, node: &Node) -> bool {
+	fn is_node_updated(&self, node: Node) -> bool {
 		self.updated_nodes.at(node.0)
 	}
 
 	pub fn replace_child(
 		&mut self,
-		parent: &Internal,
-		&old_child: &Node,
-		new_child: &Node,
+		parent: Internal,
+		old_child: Node,
+		new_child: Node,
 	) {
 		self.parents.set(new_child.0, parent.0);
 
@@ -527,43 +407,43 @@ impl Tree {
 	}
 
 	/// Prunes parent of `node` and grafts it as a parent of `other`
-	pub fn spr(&mut self, node: &Node, other: &Node) -> Result<()> {
+	pub fn spr(&mut self, node: Node, other: Node) -> Result<()> {
 		let parent = self.parent_of(node).unwrap();
-		let grandparent = self.parent_of(&parent).unwrap();
+		let grandparent = self.parent_of(*parent).unwrap();
 		let other_parent = self.parent_of(other).unwrap();
 
-		let sibling = self.other_child(&parent, node)?;
+		let sibling = self.other_child(parent, node)?;
 
-		self.replace_child(&grandparent, &parent, &sibling);
+		self.replace_child(grandparent, *parent, sibling);
 
-		self.replace_child(&other_parent, other, &parent);
+		self.replace_child(other_parent, other, *parent);
 
-		self.replace_child(&parent, &sibling, other);
+		self.replace_child(parent, sibling, other);
 
 		Ok(())
 	}
 
 	/// Sets the height of `node`, recording it and it's parent and child
 	/// edges (if it has those).
-	pub fn set_height(&mut self, node: &Node, height: f64) {
+	pub fn set_height(&mut self, node: Node, height: f64) {
 		self.heights.set(node.0, height);
 
 		if self.parent_of(node).is_some() {
 			self.mark_edge_updated(self.edge_index(node));
 		}
 		if let Some(node) = self.as_internal(node) {
-			let (left, right) = self.children_of(&node);
-			self.mark_edge_updated(self.edge_index(&left));
-			self.mark_edge_updated(self.edge_index(&right));
+			let (left, right) = self.children_of(node);
+			self.mark_edge_updated(self.edge_index(left));
+			self.mark_edge_updated(self.edge_index(right));
 		}
 	}
 
 	/// Doesn't overwrite the old root.
-	pub fn set_root(&mut self, node: &Node) {
+	pub fn set_root(&mut self, node: Internal) {
 		self.parents.set(node.0, ROOT);
 	}
 
-	pub fn swap_parents(&mut self, a: &Node, b: &Node) -> Result<()> {
+	pub fn swap_parents(&mut self, a: Node, b: Node) -> Result<()> {
 		let Some(a_parent) = self.parent_of(a) else {
 			bail!("a must not be root");
 		};
@@ -571,8 +451,8 @@ impl Tree {
 			bail!("b must not be root");
 		};
 
-		self.replace_child(&a_parent, a, b);
-		self.replace_child(&b_parent, b, a);
+		self.replace_child(a_parent, a, b);
+		self.replace_child(b_parent, b, a);
 
 		ensure!(self.is_node_height_valid(a));
 		ensure!(self.is_node_height_valid(b));
@@ -580,11 +460,11 @@ impl Tree {
 		Ok(())
 	}
 
-	pub(crate) fn is_node_height_valid(&self, node: &Node) -> bool {
+	pub(crate) fn is_node_height_valid(&self, node: Node) -> bool {
 		let height = self.height_of(node);
 
 		if let Some(parent) = self.parent_of(node)
-			&& height >= self.height_of(&parent)
+			&& height >= self.height_of(*parent)
 		{
 			return false;
 		}
@@ -593,15 +473,14 @@ impl Tree {
 			return true;
 		};
 
-		let (left, right) = self.children_of(&internal);
+		let (left, right) = self.children_of(internal);
 
-		height > self.height_of(&left)
-			&& height > self.height_of(&right)
+		height > self.height_of(left) && height > self.height_of(right)
 	}
 
 	fn has_dated_tips(&self) -> bool {
 		for leaf in self.leaves() {
-			if self.height_of(&leaf) != 0.0 {
+			if self.height_of(*leaf) != 0.0 {
 				return true;
 			}
 		}
@@ -616,7 +495,7 @@ impl Tree {
 			if node == *root {
 				continue;
 			}
-			out += self.edge_length(self.edge_index(&node));
+			out += self.edge_length(self.edge_index(node));
 		}
 		out
 	}
@@ -632,27 +511,27 @@ impl Tree {
 		}
 
 		for node in self.internals() {
-			let (left, right) = self.children_of(&node);
+			let (left, right) = self.children_of(node);
 
 			ensure!(
-				self.height_of(&node) > self.height_of(&left),
+				self.height_of(*node) > self.height_of(left),
 				"Node {} ({}) is younger than it's left child {} ({})",
 				node.0,
-				self.height_of(&node),
+				self.height_of(*node),
 				left.0,
-				self.height_of(&left),
+				self.height_of(left),
 			);
 			ensure!(
-				self.height_of(&node) > self.height_of(&right),
+				self.height_of(*node) > self.height_of(right),
 				"Node {} ({}) is younger than it's right child {} ({})",
 				node.0,
-				self.height_of(&node),
+				self.height_of(*node),
 				right.0,
-				self.height_of(&right),
+				self.height_of(right),
 			);
 
-			let left_parent = self.parent_of(&left);
-			let right_parent = self.parent_of(&right);
+			let left_parent = self.parent_of(left);
+			let right_parent = self.parent_of(right);
 			ensure!(
 				left_parent.is_some_and(|p| p == node),
 				"Expected {left:?} to have the parent {node:?}, got {left_parent:?}"
@@ -678,7 +557,7 @@ impl Tree {
 		use std::collections::HashSet;
 		let mut children = HashSet::new();
 		for node in self.internals() {
-			let (left, right) = self.children_of(&node);
+			let (left, right) = self.children_of(node);
 			children.insert(left);
 			children.insert(right);
 		}
@@ -703,15 +582,15 @@ impl Tree {
 		self.num_internals() * 2
 	}
 
-	pub fn is_internal(&self, node: &Node) -> bool {
+	pub fn is_internal(&self, node: Node) -> bool {
 		node.0 >= self.num_leaves()
 	}
 
-	pub fn is_leaf(&self, node: &Node) -> bool {
+	pub fn is_leaf(&self, node: Node) -> bool {
 		node.0 < self.num_leaves()
 	}
 
-	pub fn as_internal(&self, node: &Node) -> Option<Internal> {
+	pub fn as_internal(&self, node: Node) -> Option<Internal> {
 		if self.is_internal(node) {
 			Some(Internal(node.0))
 		} else {
@@ -719,7 +598,7 @@ impl Tree {
 		}
 	}
 
-	pub fn as_leaf(&self, node: &Node) -> Option<Leaf> {
+	pub fn as_leaf(&self, node: Node) -> Option<Leaf> {
 		if self.is_leaf(node) {
 			Some(Leaf(node.0))
 		} else {
@@ -737,16 +616,16 @@ impl Tree {
 		Internal(i)
 	}
 
-	pub fn height_of(&self, node: &Node) -> f64 {
+	pub fn height_of(&self, node: Node) -> f64 {
 		self.heights[node.0]
 	}
 
-	pub fn parent_edge_len(&self, node: &Node) -> Option<f64> {
+	pub fn parent_edge_len(&self, node: Node) -> Option<f64> {
 		let parent = self.parent_of(node)?;
-		Some(self.height_of(&parent) - self.height_of(node))
+		Some(self.height_of(*parent) - self.height_of(node))
 	}
 
-	pub fn children_of(&self, node: &Internal) -> (Node, Node) {
+	pub fn children_of(&self, node: Internal) -> (Node, Node) {
 		let index = node.0 - self.num_leaves();
 		let left = self.children[index * 2];
 		let right = self.children[index * 2 + 1];
@@ -756,13 +635,13 @@ impl Tree {
 
 	pub fn other_child(
 		&self,
-		parent: &Internal,
-		child: &Node,
+		parent: Internal,
+		child: Node,
 	) -> Result<Node> {
 		let (left, right) = self.children_of(parent);
-		if *child == left {
+		if child == left {
 			Ok(right)
-		} else if *child == right {
+		} else if child == right {
 			Ok(left)
 		} else {
 			py_bail!(
@@ -772,30 +651,15 @@ impl Tree {
 		}
 	}
 
-	/// Nodes whose parent edge intersects `height`
-	pub fn random_intersecting_edge(
-		&self,
-		height: f64,
-		rng: &mut Rng,
-	) -> Option<usize> {
-		self.edges()
-			.filter(|edge| {
-				let (node, parent) = self.edge_nodes(*edge);
-				self.height_of(&node) < height
-					&& self.height_of(&parent) > height
-			})
-			.choose(rng)
-	}
-
 	/// Index of the edge between `child` and its parent.
-	pub fn edge_index(&self, child: &Node) -> usize {
+	pub fn edge_index(&self, child: Node) -> usize {
 		child.0
 	}
 
 	pub fn edge_length(&self, edge: usize) -> f64 {
 		let (child, parent) = self.edge_nodes(edge);
 
-		self.height_of(&parent) - self.height_of(&child)
+		self.height_of(*parent) - self.height_of(child)
 	}
 
 	pub fn edge_nodes(&self, edge: usize) -> (Node, Internal) {
@@ -805,7 +669,7 @@ impl Tree {
 		(Node(child), Internal(parent))
 	}
 
-	pub fn parent_of(&self, node: &Node) -> Option<Internal> {
+	pub fn parent_of(&self, node: Node) -> Option<Internal> {
 		if self.parents[node.0] != ROOT {
 			Some(Internal(self.parents[node.0]))
 		} else {
@@ -813,15 +677,15 @@ impl Tree {
 		}
 	}
 
-	pub fn is_grandparent(&self, node: &Internal) -> bool {
+	pub fn is_grandparent(&self, node: Internal) -> bool {
 		let (left, right) = self.children_of(node);
-		self.is_internal(&left) && self.is_internal(&right)
+		self.is_internal(left) && self.is_internal(right)
 	}
 
 	pub fn num_grandparents(&self) -> usize {
 		let mut out = 0;
 		for internal in self.internals() {
-			out += usize::from(self.is_grandparent(&internal));
+			out += usize::from(self.is_grandparent(internal));
 		}
 		out
 	}
@@ -834,7 +698,7 @@ impl Tree {
 	pub fn random_nonroot_node(&self, rng: &mut Rng) -> (Node, Internal) {
 		loop {
 			let node = self.random_node(rng);
-			if let Some(parent) = self.parent_of(&node) {
+			if let Some(parent) = self.parent_of(node) {
 				return (node, parent);
 			}
 		}
@@ -851,7 +715,7 @@ impl Tree {
 	) -> (Internal, Internal) {
 		loop {
 			let node = self.random_internal(rng);
-			if let Some(parent) = self.parent_of(&node) {
+			if let Some(parent) = self.parent_of(*node) {
 				return (node, parent);
 			}
 		}
@@ -892,11 +756,10 @@ impl Tree {
 	pub fn to_newick(&self, internal_ids: bool) -> String {
 		let mut tree = NewickTree::new();
 
-		use std::collections::HashMap;
-		let mut map: HashMap<Node, NewickNodeIndex> = HashMap::new();
+		let mut map = HashMap::<Node, NewickNodeIndex>::new();
 
 		for node in self.nodes() {
-			let name = if self.is_leaf(&node) {
+			let name = if self.is_leaf(node) {
 				self.names[node.0].clone()
 			} else if internal_ids {
 				node.0.to_string()
@@ -911,10 +774,10 @@ impl Tree {
 		}
 
 		for parent in self.internals() {
-			let (left, right) = self.children_of(&parent);
+			let (left, right) = self.children_of(parent);
 			let (left_len, right_len) = (
-				self.parent_edge_len(&left),
-				self.parent_edge_len(&right),
+				self.parent_edge_len(left),
+				self.parent_edge_len(right),
 			);
 			let (left_edge, right_edge) = (
 				NewickEdge::new(left_len, String::new()),
@@ -925,7 +788,7 @@ impl Tree {
 			tree.add_edge(map[&parent], map[&right], right_edge);
 
 			// set root
-			if self.parent_of(&parent).is_none() {
+			if self.parent_of(*parent).is_none() {
 				tree.set_root(map[&parent]);
 			}
 		}
@@ -1064,19 +927,6 @@ impl PyTree {
 		Ok(tree)
 	}
 
-	/// Initializes the tree from a Newick object.
-	///
-	/// The Newick tree must be strictly bifurcating and all of its edges
-	/// must have a defined length.
-	#[classmethod]
-	fn from_newick(_cls: Py<PyType>, newick: NewickTree) -> Result<Self> {
-		let tree = Tree::from_newick(&newick)?;
-		let tree = Self {
-			inner: Mutex::new(tree),
-		};
-		Ok(tree)
-	}
-
 	/// Randomizes the tree structure
 	///
 	/// This methods creates a random [Prüfer sequence][wiki] and
@@ -1123,17 +973,17 @@ impl PyTree {
 		old_child: Node,
 		new_child: Node,
 	) -> Result<()> {
-		self.inner().replace_child(&parent, &old_child, &new_child);
+		self.inner().replace_child(parent, old_child, new_child);
 		Ok(())
 	}
 
 	fn spr(&self, node: Node, other: Node) -> Result<()> {
-		self.inner().spr(&node, &other)
+		self.inner().spr(node, other)
 	}
 
 	/// Sets the height of `node` to `height`
 	fn set_height(&self, node: Node, height: f64) -> Result<()> {
-		self.inner().set_height(&node, height);
+		self.inner().set_height(node, height);
 		Ok(())
 	}
 
@@ -1143,8 +993,8 @@ impl PyTree {
 	/// swapped, `Tree` can't automatically figure out which node is the
 	/// root one.  So, operators which change the root of the tree have to
 	/// update it manually.
-	fn set_root(&self, node: Node) -> Result<()> {
-		self.inner().set_root(&node);
+	fn set_root(&self, node: Internal) -> Result<()> {
+		self.inner().set_root(node);
 		Ok(())
 	}
 
@@ -1155,7 +1005,7 @@ impl PyTree {
 	/// switch polarity (left child becomes the right child and visa
 	/// versa).
 	fn swap_parents(&self, a: Node, b: Node) -> Result<()> {
-		self.inner().swap_parents(&a, &b)
+		self.inner().swap_parents(a, b)
 	}
 
 	/// Total number of nodes in the tree
@@ -1184,12 +1034,12 @@ impl PyTree {
 
 	/// Returns `True` if the node is internal
 	fn is_internal(&self, node: Node) -> Result<bool> {
-		Ok(self.inner().is_internal(&node))
+		Ok(self.inner().is_internal(node))
 	}
 
 	/// Returns `True` if the node is a leaf
 	fn is_leaf(&self, node: Node) -> Result<bool> {
-		Ok(self.inner().is_leaf(&node))
+		Ok(self.inner().is_leaf(node))
 	}
 
 	/// Returns the root node of the tree
@@ -1206,7 +1056,7 @@ impl PyTree {
 	///
 	/// Height here means node's age in some unlabeled units.
 	fn height_of(&self, node: Node) -> Result<f64> {
-		Ok(self.inner().height_of(&node))
+		Ok(self.inner().height_of(node))
 	}
 
 	/// Returns a tuple of the left and right children of `node`
@@ -1219,7 +1069,7 @@ impl PyTree {
 		py: Python<'py>,
 		node: Internal,
 	) -> Result<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
-		let (left, right) = self.inner().children_of(&node);
+		let (left, right) = self.inner().children_of(node);
 
 		let (left, right) = (
 			left.into_pyobject(py, self.num_leaves())?,
@@ -1239,29 +1089,13 @@ impl PyTree {
 		child: Node,
 	) -> Result<Bound<'py, PyAny>> {
 		let inner = self.inner();
-		inner.other_child(&parent, &child)
+		inner.other_child(parent, child)
 			.and_then(|n| n.into_pyobject(py, inner.num_leaves()))
-	}
-
-	/// Returns a random edge which intersects `height`
-	///
-	/// "Intersects" here means that the edge parent is higher than
-	/// `height` and the child is lower.  The comparisons are strict: if
-	/// either node is exactly at `height`, the edge won't be picked.
-	///
-	/// Returns `None` if there is no such node.
-	fn random_intersecting_edge(
-		&self,
-		height: f64,
-		rng: &PyRng,
-	) -> Option<usize> {
-		self.inner()
-			.random_intersecting_edge(height, &mut rng.inner())
 	}
 
 	/// Returns the index of an edge from `child` to its parent
 	fn edge_index(&self, child: Node) -> usize {
-		self.inner().edge_index(&child)
+		self.inner().edge_index(child)
 	}
 
 	/// Returns the length of `edge`
@@ -1287,11 +1121,11 @@ impl PyTree {
 
 	/// Returns the parent of `node`, or `None` for the root node
 	fn parent_of(&self, node: Node) -> Result<Option<Internal>> {
-		Ok(self.inner().parent_of(&node))
+		Ok(self.inner().parent_of(node))
 	}
 
 	/// Returns `True` if both children of this node are also internal
-	fn is_grandparent(&self, node: &Internal) -> bool {
+	fn is_grandparent(&self, node: Internal) -> bool {
 		self.inner().is_grandparent(node)
 	}
 
