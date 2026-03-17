@@ -1,12 +1,12 @@
 use anyhow::{Result, bail, ensure};
+use bytemuck::cast_slice;
 use parking_lot::Mutex;
 use pyo3::{
 	exceptions::{PyTypeError, PyValueError},
 	prelude::*,
-	types::{PyAny, PyType},
+	types::PyAny,
 };
 use rand::{RngExt, seq::SliceRandom};
-use serde::{Deserialize, Serialize};
 
 use std::{
 	cmp::Reverse,
@@ -29,7 +29,7 @@ use util::py_bail;
 
 const ROOT: usize = 0x524f4f54;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Tree {
 	names: Vec<String>,
 
@@ -293,10 +293,8 @@ impl Tree {
 		out
 	}
 
-	pub fn nodes_to_update(&mut self) -> (Vec<Node>, usize) {
-		let mut nodes = Vec::<Node>::with_capacity(self.num_nodes());
-
-		// mark updated nodes derived from edges
+	pub fn mark_transitively_updated_nodes(&mut self) {
+		// mark updated nodes whose parent edge got updated
 		for edge in self.edges() {
 			if self.updated_edges.at(edge) {
 				let (child, _) = self.edge_nodes(edge);
@@ -321,6 +319,10 @@ impl Tree {
 				}
 			}
 		}
+	}
+
+	pub fn nodes_to_update(&self) -> (Vec<Node>, usize) {
+		let mut nodes = Vec::<Node>::with_capacity(self.num_nodes());
 
 		// Updated leaves, in order
 		for leaf in self.leaves() {
@@ -382,6 +384,10 @@ impl Tree {
 
 	fn is_node_updated(&self, node: Node) -> bool {
 		self.updated_nodes.at(node.0)
+	}
+
+	pub fn is_node_height_updated(&self, node: Node) -> bool {
+		self.heights.is_changed_at(node.0)
 	}
 
 	pub fn replace_child(
@@ -803,11 +809,45 @@ impl Parameter for Tree {
 	}
 
 	fn dump(&self, dst: &mut dyn Write) -> Result<()> {
-		Ok(verbatim::to_writer(&self, dst)?)
+		for height in &self.heights {
+			dst.write_all(&height.to_le_bytes())?;
+		}
+		for child in &self.children {
+			let child = *child as u32;
+			dst.write_all(&child.to_le_bytes())?;
+		}
+
+		Ok(())
 	}
 
 	fn load(&mut self, bytes: &[u8]) -> Result<()> {
-		*self = verbatim::from_slice(bytes)?;
+		let num_nodes = self.num_nodes();
+		ensure!(bytes.len()
+			== num_nodes * size_of::<f64>()
+				+ self.num_edges() * size_of::<u32>());
+
+		let (heights, children) =
+			bytes.split_at(num_nodes * size_of::<f64>());
+		let heights: &[f64] = cast_slice(heights);
+		let children: &[u32] = cast_slice(children);
+
+		for (i, height) in heights.iter().enumerate() {
+			self.heights.set(i, *height);
+		}
+
+		// overwrite all parents as one of them will be left as root
+		for internal in self.internals() {
+			self.parents.set(internal.0, ROOT);
+		}
+
+		let num_leaves = self.num_leaves();
+		for (i, child) in children.iter().enumerate() {
+			let child = *child as usize;
+			self.children.set(i, child);
+			let parent = i / 2 + num_leaves;
+			self.parents.set(child, parent);
+		}
+
 		// TODO: saner MCMC.load in regards to likelihood
 		// initialization
 		self.mark_all_edges_updated();
@@ -1233,19 +1273,6 @@ impl PyTree {
 	#[pyo3(signature = (internal_ids = false))]
 	fn newick(&self, internal_ids: bool) -> String {
 		self.inner().to_newick(internal_ids)
-	}
-
-	fn to_json(&self) -> Result<String> {
-		Ok(serde_json::to_string(&*self.inner())?)
-	}
-
-	#[classmethod]
-	fn from_json(_cls: Py<PyType>, json: String) -> Result<Self> {
-		let inner: Tree = serde_json::from_str(&json)?;
-
-		Ok(Self {
-			inner: inner.into(),
-		})
 	}
 
 	fn set(&self, other: &PyTree) {

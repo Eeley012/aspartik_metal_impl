@@ -1,10 +1,11 @@
-use std::ops::Deref;
-
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use pyo3::{prelude::*, types::PyType};
 
+use std::ops::Deref;
+
 use crate::{
-	DnaNucleotide, Msa, fasta::python::PyFastaDnaRecord,
+	DnaNucleotide, Msa,
+	fasta::{Record, python::PyFastaDnaRecord},
 	seq::python::PyDnaSeq,
 };
 
@@ -14,7 +15,7 @@ use crate::{
 #[derive(Debug)]
 #[pyclass(name = "MSA", module = "aspartik.data.msa", frozen, eq)]
 #[repr(transparent)]
-pub struct PyMsa(Msa<DnaNucleotide>);
+pub struct PyMsa(pub Msa<DnaNucleotide>);
 
 impl PartialEq for PyMsa {
 	fn eq(&self, other: &Self) -> bool {
@@ -32,13 +33,25 @@ impl Deref for PyMsa {
 
 #[pymethods]
 impl PyMsa {
+	#[new]
+	fn new(names: Vec<String>, sequences: Vec<PyDnaSeq>) -> Result<Self> {
+		ensure!(names.len() == sequences.len());
+		let iter = sequences
+			.into_iter()
+			.zip(names)
+			.map(|(s, n)| Ok(Record::new(n, s.0)));
+		Msa::from_fasta(iter).map(PyMsa)
+	}
+
 	/// Constructs an MSA from a list of FASTA records
 	#[classmethod]
 	fn from_fasta(
 		_cls: Py<PyType>,
 		records: Vec<Py<PyFastaDnaRecord>>,
 	) -> Result<Self> {
-		let msa = Msa::from_fasta(records.into_iter())?;
+		let msa = Msa::from_fasta(
+			records.into_iter().map(|r| Ok(r.get().0.clone())),
+		)?;
 		Ok(Self(msa))
 	}
 

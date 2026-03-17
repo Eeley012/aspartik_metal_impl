@@ -1,251 +1,142 @@
 use anyhow::Result;
-use bytemuck::{allocation::cast_vec, cast_slice};
-use num_traits::{Float, Inv, Num, NumAssign};
-
-use std::{ops::Mul, slice};
-
-use crate::transitions;
 
 use super::Calculator;
-use linalg::{RowMatrix, Vector};
-use skvec::{SkVec, skvec};
+use crate::{Transitions, parameters::Tree};
 
+#[allow(dead_code)]
 pub struct CpuLikelihood<const N: usize, F> {
-	leaves: Vec<u8>,
-	projections: SkVec<Vector<F, N>>,
+	num_patterns: usize,
 
-	num_sites: usize,
-	num_leaves: usize,
+	pattern_weights: Vec<u32>,
 
-	updated_edges: Vec<usize>,
+	selectors: Vec<u8>,
+	selectors_backup: Vec<u8>,
+
+	/// Have the length of `num_patterns`
+	samples: Vec<u8>,
+	projections: Vec<[F; N]>,
+
 	likelihoods: Vec<f64>,
 
-	scales: SkVec<bool>,
-	scale_sums: SkVec<u32>,
+	scales: Vec<bool>,
+	scale_sums: Vec<u32>,
+	scale_sums_backup: Vec<u32>,
 
-	scale: F,
-	inv_scale: F,
+	/// Scaling threshold on logarithmic scale
 	scale_ln: u32,
+	/// `e^(-scale_ln)`
+	scale_threshold: F,
+	/// `e^scale_ln`
+	scale_mult: F,
 }
 
-impl<const N: usize, F> Calculator<N, F> for CpuLikelihood<N, F>
-where
-	F: Float + Num + NumAssign,
-	f64: From<F> + From<u32>,
-	RowMatrix<F, N, N>: Mul<Vector<F, N>, Output = Vector<F, N>>,
-	Vector<F, N>: Mul<Output = Vector<F, N>>,
-{
-	fn propose(
+impl Calculator<4, f64> for CpuLikelihood<4, f64> {
+	fn likelihood(
 		&mut self,
-		nodes: &[usize],
-		children: &[(usize, usize)],
-		transitions: &[[[F; N]; N]],
-		leaves_end: usize,
-		frequencies: [F; N],
-	) -> Result<()> {
-		let transitions = cast_transitions(transitions);
+		tree: &Tree,
+		transitions: &Transitions<4, f64>,
+	) -> Result<f64> {
+		let (nodes, leaves_end) = tree.nodes_to_update();
+		let (nodes, children) = tree.to_lists(&nodes);
+		let frequencies = transitions.frequencies();
+		let tms = transitions.matrices(&nodes[..nodes.len() - 1]);
 
-		self.updated_edges = nodes.to_vec();
+		let c_nodes: Vec<u32> =
+			nodes.iter().map(|&n| n as u32).collect();
+		let c_children: Vec<_> = children
+			.iter()
+			.map(|&(l, r)| [l as u32, r as u32])
+			.collect();
 
-		let num_sites = self.num_sites;
-		let num_leaves = self.num_leaves;
-
-		for i in 0..leaves_end {
-			let transition = &transitions[i];
-
-			let leaf = nodes[i];
-			let leaf_idx = leaf * num_sites;
-
-			for site in 0..num_sites {
-				let leaf = self.leaves[leaf_idx + site];
-				let projection =
-					calc_leaf_projection(transition, leaf);
-				self.projections
-					.set(leaf_idx + site, projection);
-			}
+		// SAFETY: TODO
+		unsafe {
+			ccalc::propose(
+				c_nodes.as_ptr(),
+				c_nodes.len() as u32,
+				c_children.as_ptr() as *const u32,
+				tms.as_ptr() as *mut f64,
+				leaves_end as u32,
+				frequencies.into(),
+				//
+				self.num_patterns as u32,
+				self.samples.as_ptr(),
+				self.projections.as_mut_ptr() as *mut f64,
+				self.selectors.as_mut_ptr(),
+				self.likelihoods.as_mut_ptr(),
+			)
 		}
 
-		for i in leaves_end..nodes.len() - 1 {
-			let transition = transitions[i];
-			let node = nodes[i];
-
-			let node_idx = node * num_sites;
-
-			let (left_edge, right_edge) = children[i - leaves_end];
-
-			let left_idx = left_edge * num_sites;
-			let right_idx = right_edge * num_sites;
-
-			for site in 0..num_sites {
-				let left = self.projections[left_idx + site];
-				let right = self.projections[right_idx + site];
-
-				let likelihood = left * right;
-				let mut projection = transition * likelihood;
-
-				let should_scale = if projection < self.scale {
-					projection *= self.inv_scale;
-					true
-				} else {
-					false
-				};
-
-				let projection_index = node_idx + site;
-				let old_scale = self.scales[projection_index];
-
-				self.projections
-					.set(projection_index, projection);
-
-				if should_scale != old_scale {
-					self.scales.set(
-						projection_index,
-						should_scale,
-					);
-
-					let old = self.scale_sums[site];
-
-					let new = if should_scale {
-						old + self.scale_ln
-					} else {
-						old - self.scale_ln
-					};
-
-					self.scale_sums.set(site, new);
-				}
-			}
+		for ((likelihood, scale), weight) in self
+			.likelihoods
+			.iter_mut()
+			.zip(&self.scale_sums)
+			.zip(&self.pattern_weights)
+		{
+			*likelihood -= f64::from(*scale);
+			*likelihood *= f64::from(*weight);
 		}
 
-		let root = nodes.last().unwrap();
-		let (root_left_edge, root_right_edge) =
-			children.last().unwrap();
-		let root_idx = root * num_sites;
-
-		let root_left_idx = root_left_edge * num_sites;
-		let root_right_idx = root_right_edge * num_sites;
-
-		let frequencies = Vector::from(frequencies);
-		for site in 0..num_sites {
-			let left = self.projections[root_left_idx + site];
-			let right = self.projections[root_right_idx + site];
-			let likelihood = left * right;
-			let likelihood = likelihood * frequencies;
-			let ln_sum = likelihood.sum().ln();
-
-			self.likelihoods[site] = ln_sum.into();
-
-			if self.scales[root_idx + site] {
-				self.scales.set(root_idx + site, false);
-				self.scale_sums.set(
-					site,
-					self.scale_sums[site] - self.scale_ln,
-				);
-			}
-		}
-
-		Ok(())
-	}
-
-	fn likelihood(&mut self, patterns: &mut [f64]) -> Result<()> {
-		patterns.copy_from_slice(&self.likelihoods);
-
-		for (i, scale_sum) in self.scale_sums.iter().enumerate() {
-			patterns[i] -= f64::from(*scale_sum);
-		}
-
-		Ok(())
+		Ok(self.likelihoods.iter().sum())
 	}
 
 	fn accept(&mut self) -> Result<()> {
-		self.projections.accept();
-		self.scales.accept();
-		self.scale_sums.accept();
+		self.selectors_backup.copy_from_slice(&self.selectors);
+		self.scale_sums_backup.copy_from_slice(&self.scale_sums);
+
 		Ok(())
 	}
 
 	fn reject(&mut self) -> Result<()> {
-		self.projections.reject();
-		self.scales.reject();
-		self.scale_sums.reject();
+		self.selectors.copy_from_slice(&self.selectors_backup);
+		self.scale_sums.copy_from_slice(&self.scale_sums_backup);
 
 		Ok(())
 	}
-}
 
-pub fn calc_leaf_projection<const N: usize, F: Num + NumAssign + Copy>(
-	transition: &RowMatrix<F, N, N>,
-	leaf: u8,
-) -> Vector<F, N> {
-	let mut out = Vector::zeros();
-
-	if leaf & 0b0001 != 0 {
-		out[0] += transition[0][0];
-		out[1] += transition[1][0];
-		out[2] += transition[2][0];
-		out[3] += transition[3][0];
-	}
-	if leaf & 0b0010 != 0 {
-		out[0] += transition[0][1];
-		out[1] += transition[1][1];
-		out[2] += transition[2][1];
-		out[3] += transition[3][1];
-	}
-	if leaf & 0b0100 != 0 {
-		out[0] += transition[0][2];
-		out[1] += transition[1][2];
-		out[2] += transition[2][2];
-		out[3] += transition[3][2];
-	}
-	if leaf & 0b1000 != 0 {
-		out[0] += transition[0][3];
-		out[1] += transition[1][3];
-		out[2] += transition[2][3];
-		out[3] += transition[3][3];
-	}
-
-	out
-}
-
-pub fn cast_transitions<const N: usize, F>(
-	transitions: &[[[F; N]; N]],
-) -> &[RowMatrix<F, N, N>] {
-	unsafe {
-		slice::from_raw_parts(
-			transitions.as_ptr() as *const _,
-			transitions.len(),
-		)
+	fn num_patterns(&self) -> usize {
+		self.num_patterns
 	}
 }
 
 impl CpuLikelihood<4, f64> {
-	pub fn new(num_sites: usize, leaves: Vec<u8>, scale_ln: u32) -> Self {
-		let num_leaves = leaves.len() / num_sites;
+	pub fn new(
+		pattern_weights: Vec<u32>,
+		leaves: Vec<u8>,
+		scale_ln: u32,
+	) -> Self {
+		let num_patterns = pattern_weights.len();
+		let num_leaves = leaves.len() / num_patterns;
 		let num_internals = num_leaves - 1;
 		let num_nodes = num_leaves + num_internals;
-		let num_edges = num_internals * 2;
 
 		let projections =
-			skvec![Vector::default(); num_nodes * num_sites];
-		let scales = skvec![false; num_nodes * num_sites];
-		let scale_sums = skvec![0; num_sites];
+			vec![Default::default(); num_nodes * num_patterns * 2];
+		let scales = vec![false; num_nodes * num_patterns * 2];
+		let scale_sums = vec![0; num_patterns];
 
-		let scale = (-<f64 as From<u32>>::from(scale_ln)).exp();
+		let scale_ln_f64: f64 = scale_ln.into();
+		let scale_mult = scale_ln_f64.exp();
+		let scale_threshold = (-scale_ln_f64).exp();
 
 		Self {
-			leaves,
+			num_patterns,
+			pattern_weights,
+
+			selectors: vec![0; num_nodes],
+			selectors_backup: vec![0; num_nodes],
+
+			samples: leaves,
 			projections,
 
-			num_sites,
-			num_leaves,
-
-			updated_edges: Vec::new(),
-			likelihoods: vec![f64::NAN; num_sites],
+			likelihoods: vec![f64::NAN; num_patterns],
 
 			scales,
+			scale_sums_backup: scale_sums.clone(),
 			scale_sums,
 
-			scale,
-			inv_scale: scale.inv(),
 			scale_ln,
+			scale_threshold,
+			scale_mult,
 		}
 	}
 }

@@ -12,7 +12,7 @@ use arrow_ipc::{
 };
 use arrow_schema::{DataType, Field, SchemaBuilder, SchemaRef};
 use parking_lot::Mutex;
-use pyo3::prelude::*;
+use pyo3::{prelude::*, types::PyDict};
 
 use std::{
 	collections::HashMap,
@@ -25,13 +25,14 @@ use std::{
 use crate::{
 	mcmc::Mcmc,
 	parameters::{Parameter, PyClassVector, PyReal, PyRealVector, PyTree},
+	priors::PyPrior,
 };
 
 type Arrays = HashMap<String, Box<dyn ArrayBuilder>>;
 
 #[pyclass(module = "aspartik.b3.callbacks", frozen)]
 pub struct TraceWriter {
-	items: HashMap<String, Py<PyAny>>,
+	items: Vec<(String, Py<PyAny>)>,
 	arrays: Mutex<Arrays>,
 	schema: SchemaRef,
 	writer: Mutex<FileWriter<BufWriter<File>>>,
@@ -49,12 +50,14 @@ impl TraceWriter {
 	))]
 	fn new(
 		py: Python,
-		items: HashMap<String, Py<PyAny>>,
-		mut path: PathBuf,
+		items: Bound<'_, PyDict>,
+		path: PathBuf,
 		zstd: bool,
 		overwrite: bool,
 		every: usize,
 	) -> Result<Self> {
+		let items = dict_to_vec(items)?;
+
 		let mut arrays = HashMap::new();
 		let mut schema = SchemaBuilder::new();
 
@@ -83,7 +86,6 @@ impl TraceWriter {
 		let schema = schema.finish();
 
 		let compression = if zstd {
-			path.as_mut_os_string().push(".zst");
 			Some(CompressionType::ZSTD)
 		} else {
 			None
@@ -101,7 +103,12 @@ impl TraceWriter {
 			.truncate(true)
 			.create_new(!overwrite)
 			.open(&path)
-			.context("Failed to create the trace file")?;
+			.with_context(|| {
+				format!(
+					"Failed to create the trace file {}",
+					path.display()
+				)
+			})?;
 		let writer = BufWriter::new(file);
 		let writer = FileWriter::try_new_with_options(
 			writer,
@@ -121,7 +128,8 @@ impl TraceWriter {
 	}
 
 	fn call(&self, py: Python, mcmc: &Mcmc) -> Result<()> {
-		let arrays = &mut *self.arrays.lock();
+		let mut arrays_lock = self.arrays.lock();
+		let arrays = &mut *arrays_lock;
 
 		let array = get::<UInt64Builder>(arrays, "step");
 		array.append_value(mcmc.current_step() as u64);
@@ -135,14 +143,23 @@ impl TraceWriter {
 		let array = get::<Float64Builder>(arrays, "likelihood");
 		array.append_value(mcmc.likelihood_value()?);
 
+		let mut max_size = 0;
 		for (name, value) in &self.items {
-			write_value(name, value.bind(py), arrays)?;
+			let size = write_value(name, value.bind(py), arrays)?;
+			max_size = max_size.max(size);
+		}
+
+		drop(arrays_lock);
+
+		// 64MB
+		if max_size > 64_000_000 {
+			self.write_batch()?;
 		}
 
 		Ok(())
 	}
 
-	fn finish(&self) -> Result<()> {
+	fn finish(&self, _mcmc: Py<Mcmc>) -> Result<()> {
 		self.write_batch()?;
 		self.writer.lock().finish()?;
 		Ok(())
@@ -172,10 +189,13 @@ fn write_value(
 	name: &str,
 	value: &Bound<'_, PyAny>,
 	arrays: &mut Arrays,
-) -> Result<()> {
+) -> Result<usize> {
+	let size: usize;
+
 	if let Ok(real) = value.cast_exact::<PyReal>() {
 		let array = get::<Float64Builder>(arrays, name);
 		array.append_value(real.get().inner().value());
+		size = array.len() * 8;
 	} else if let Ok(real_vector) = value.cast_exact::<PyRealVector>() {
 		let array = get::<ListBuilder<Float64Builder>>(arrays, name);
 		let subarr = array.values();
@@ -183,20 +203,38 @@ fn write_value(
 			subarr.append_value(*value);
 		}
 		array.append(true);
+		size = *array.offsets_slice().last().unwrap() as usize;
 	} else if let Ok(class_vector) = value.cast_exact::<PyClassVector>() {
 		let array = get::<ListBuilder<UInt8Builder>>(arrays, name);
 		for value in class_vector.get().inner().iter() {
 			array.values().append_value(*value);
 		}
 		array.append(true);
+		size = *array.offsets_slice().last().unwrap() as usize;
 	} else if let Ok(tree) = value.cast_exact::<PyTree>() {
+		let tree = &*tree.get().inner();
+
 		let array = get::<BinaryBuilder>(arrays, name);
-		tree.get().inner().dump(array)?;
+		tree.dump(array)?;
 		array.append_value("");
-		// TODO: length and height
+		size = *array.offsets_slice().last().unwrap() as usize;
+
+		let name_length = format!("{name}:length");
+		let array = get::<Float64Builder>(arrays, &name_length);
+		array.append_value(tree.total_length());
+
+		let name_height = format!("{name}:height");
+		let array = get::<Float64Builder>(arrays, &name_height);
+		array.append_value(tree.height_of(*tree.root()));
+	} else if let Ok(prior) = value.extract::<PyPrior>() {
+		let array = get::<Float64Builder>(arrays, name);
+		array.append_value(prior.probability(value.py())?);
+		size = array.len() * 8;
+	} else {
+		unreachable!();
 	}
 
-	Ok(())
+	Ok(size)
 }
 
 fn init_value(
@@ -229,7 +267,25 @@ fn init_value(
 			name.to_owned(),
 			dyn_builder(BinaryBuilder::new()),
 		);
-		// TODO: length and height
+
+		let name_length = format!("{name}:length");
+		schema.push(field(&name_length, DataType::Float64));
+		arrays.insert(name_length, dyn_builder(Float64Builder::new()));
+
+		let name_height = format!("{name}:height");
+		schema.push(field(&name_height, DataType::Float64));
+		arrays.insert(name_height, dyn_builder(Float64Builder::new()));
+	} else if let Ok(_value) = value.extract::<PyPrior>() {
+		schema.push(field(name, DataType::Float64));
+		arrays.insert(
+			name.to_owned(),
+			dyn_builder(Float64Builder::new()),
+		);
+	} else {
+		bail!(
+			"Unsupported logging target: {}",
+			value.get_type().name()?,
+		);
 	}
 
 	Ok(())
@@ -275,4 +331,16 @@ fn get<'a, T: 'static>(
 		.as_any_mut()
 		.downcast_mut::<T>()
 		.unwrap()
+}
+
+fn dict_to_vec(dict: Bound<'_, PyDict>) -> Result<Vec<(String, Py<PyAny>)>> {
+	let mut out = vec![];
+
+	for (key, value) in dict {
+		let key = key.extract::<String>()?;
+
+		out.push((key, value.unbind()))
+	}
+
+	Ok(out)
 }

@@ -1,4 +1,5 @@
 import os
+import platform
 import subprocess
 import sys
 from argparse import ArgumentParser, Namespace
@@ -7,6 +8,10 @@ from pathlib import Path
 from shutil import rmtree
 
 from . import doc
+
+
+def is_ci():
+    return os.environ.get("CI") is not None
 
 
 def add_langopts(parser: ArgumentParser):
@@ -52,6 +57,10 @@ def make_parser():
 
     subparsers.add_parser("pdoc", help="build the pdoc HTML files")
 
+    subparsers.add_parser("build", help="build the platform wheel")
+
+    subparsers.add_parser("sdist", help="build sdist")
+
     return parser
 
 
@@ -81,7 +90,7 @@ def fix(args: Namespace):
 
     if args.python:
         execute("ruff format")
-        execute("ruff check --fix")
+        execute("ruff check --extend-select F401 --fix")
 
     if args.website:
         with chdir("website/"):
@@ -97,9 +106,9 @@ def lint(args: Namespace):
 
     if args.python:
         execute("ruff format --check")
-        execute("ruff check")
+        execute("ruff check --extend-select F401")
 
-        execute("pyright")
+        execute("ty check")
 
     if args.website:
         with chdir("website/"):
@@ -115,9 +124,10 @@ def test(args: Namespace):
 
 
 def run():
-    execute("maturin develop --release")
-    execute("uv run python/examples/apes.py")
-    execute("uv run python/examples/influenza.py 50_000")
+    execute("uv run --no-sync python/examples/apes.py")
+
+    influenza_len = 100 if is_ci() else 20_000
+    execute(f"uv run --no-sync python/examples/influenza.py {influenza_len}")
 
 
 ARTIFACTS = [
@@ -142,11 +152,35 @@ def clean():
     for path in Path(".").glob("python/**/__pycache__/"):
         rmtree(path)
 
+    for path in Path(".").glob("b3-error-*.state"):
+        path.unlink()
+
     for path in map(Path, ARTIFACTS):
         if path.is_file():
             path.unlink()
         elif path.is_dir():
             rmtree(path)
+
+
+def build(args: Namespace):
+    rmtree("target/wheels/", ignore_errors=True)
+
+    execute("maturin build --release")
+
+    if platform.system() == "Windows":
+        wheel_dir = Path("target/wheels/")
+        wheel_path = next(wheel_dir.iterdir())
+
+        paths = "C:/mingw64/bin/;C:/msys64/ucrt64/bin/;C:/msys64/mingw64/bin/"
+        execute(
+            f"delvewheel repair --add-path {paths} --include libgfortran-5.dll {wheel_path}"
+        )
+        execute(f"uv pip install wheelhouse/{wheel_path.name}")
+
+
+def sdist():
+    rmtree("target/sdist/", ignore_errors=True)
+    execute("maturin sdist --out target/sdist/")
 
 
 def pdoc():
@@ -173,5 +207,9 @@ def main():
             clean()
         case "pdoc":
             pdoc()
+        case "build":
+            build(args)
+        case "sdist":
+            sdist()
         case None:
             parser.print_help()

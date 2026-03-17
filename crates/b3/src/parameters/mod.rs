@@ -44,6 +44,10 @@ macro_rules! impl_pyparameter_common {
 				self.inner().is_changed()
 			}
 
+			pub fn load(&self, bytes: &[u8]) -> Result<()> {
+				self.inner().load(bytes)
+			}
+
 			pub fn accept(&self) {
 				self.inner().accept();
 			}
@@ -55,29 +59,12 @@ macro_rules! impl_pyparameter_common {
 	};
 }
 
+#[derive(FromPyObject)]
 pub enum PyParameter {
 	ClassVector(Py<PyClassVector>),
 	Real(Py<PyReal>),
 	RealVector(Py<PyRealVector>),
 	Tree(Py<PyTree>),
-}
-
-impl<'py> FromPyObject<'_, 'py> for PyParameter {
-	type Error = PyErr;
-
-	fn extract(obj: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
-		if let Ok(class_vector) = obj.cast::<PyClassVector>() {
-			Ok(Self::ClassVector(class_vector.into()))
-		} else if let Ok(real) = obj.cast::<PyReal>() {
-			Ok(Self::Real(real.into()))
-		} else if let Ok(real_vector) = obj.cast::<PyRealVector>() {
-			Ok(Self::RealVector(real_vector.into()))
-		} else if let Ok(tree) = obj.cast::<PyTree>() {
-			Ok(Self::Tree(tree.into()))
-		} else {
-			todo!("descriptive error")
-		}
-	}
 }
 
 impl<'py> IntoPyObject<'py> for PyParameter {
@@ -86,17 +73,25 @@ impl<'py> IntoPyObject<'py> for PyParameter {
 	type Error = PyErr;
 
 	fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, PyErr> {
-		let any = match self {
-			Self::ClassVector(p) => p.clone_ref(py).into_any(),
-			Self::Real(p) => p.clone_ref(py).into_any(),
-			Self::RealVector(p) => p.clone_ref(py).into_any(),
-			Self::Tree(p) => p.clone_ref(py).into_any(),
-		};
-		Ok(any.into_bound(py))
+		Ok(match self {
+			Self::ClassVector(p) => p.into_bound(py).into_any(),
+			Self::Real(p) => p.into_bound(py).into_any(),
+			Self::RealVector(p) => p.into_bound(py).into_any(),
+			Self::Tree(p) => p.into_bound(py).into_any(),
+		})
 	}
 }
 
 impl PyParameter {
+	pub fn into_py_any(&self, py: Python) -> Py<PyAny> {
+		match self {
+			Self::ClassVector(p) => p.clone_ref(py).into(),
+			Self::Real(p) => p.clone_ref(py).into(),
+			Self::RealVector(p) => p.clone_ref(py).into(),
+			Self::Tree(p) => p.clone_ref(py).into(),
+		}
+	}
+
 	pub fn as_ref(&self) -> MappedMutexGuard<'_, dyn Parameter> {
 		match self {
 			Self::ClassVector(p) => {

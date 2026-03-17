@@ -8,10 +8,10 @@ authors.workspace = true
 
 [dependencies]
 bitmap = { workspace = true }
+ccalc = { workspace = true }
 data = { workspace = true }
 io = { workspace = true }
 linalg = { workspace = true, features = ["bytemuck", "cuda"] }
-logger = { workspace = true }
 rng = { workspace = true }
 skvec = { workspace = true, features = ["serde"] }
 util = { workspace = true }
@@ -30,8 +30,7 @@ pyo3 = { workspace = true, features = ["anyhow", "multiple-pymethods"] }
 rand = { workspace = true }
 rand_pcg = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-verbatim = { workspace = true, features = ["std"] }
+serde_verbatim = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true

@@ -5,7 +5,7 @@
 from aspartik.b3 import MCMC, Clock
 from aspartik.b3.callbacks import TraceWriter
 from aspartik.b3.likelihoods import CPU4Likelihood
-from aspartik.b3.loggers import PrintLogger, TreeLogger, ValueLogger
+from aspartik.b3.loggers import PrintLogger, TreeLogger
 from aspartik.b3.operators import (
     BeastNarrowExchange,
     BeastWideExchange,
@@ -20,7 +20,7 @@ from aspartik.b3.parameters import Real, RealVector, Tree
 from aspartik.b3.priors import ConstantPopulation, Distribution
 from aspartik.b3.substitutions import HKY
 from aspartik.b3.utils import run_from_cmdline
-from aspartik.io.msa import read_msa_from_fasta
+from aspartik.io import read_msa_from_fasta
 from aspartik.rng import RNG
 from aspartik.stats.distributions import Gamma, LogNormal, Uniform
 
@@ -67,30 +67,15 @@ def make_mcmc(fasta_path: str):
     loggers = [
         TreeLogger(tree=tree, path="target/apes.trees", every=1_000),
         PrintLogger(every=10_000),
-        ValueLogger(
-            {
-                "step": lambda: mcmc.current_step,
-                "posterior": lambda: mcmc.posterior,
-                "prior": lambda: mcmc.prior,
-                "likelihood": lambda: mcmc.likelihood.likelihood(),
-                "tree:height": lambda: tree.height_of(tree.root),
-                "tree:length": lambda: tree.total_length(),
-                "kappa": kappa,
-                "population_size": population_size,
-                "frequencies": frequencies,
-                "prior:kappa": priors[0],
-                "prior:population_size": priors[1],
-                "prior:coalescent": priors[2],
-            },
-            path="target/apes.log",
-            every=1_000,
-        ),
         TraceWriter(
             {
                 "kappa": kappa,
                 "population_size": population_size,
                 "frequencies": frequencies,
                 "tree": tree,
+                "prior:kappa": priors[0],
+                "prior:population_size": priors[1],
+                "prior:coalescent": priors[2],
             },
             "target/apes.trace",
             overwrite=True,

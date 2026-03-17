@@ -10,15 +10,11 @@ from ..b3.likelihoods import Likelihood
 from ..b3.parameters import Node, Parameter, Scalable
 from ..b3.substitutions import Substiution4
 from ..data.msa import MSA
-from ..data.newick import Tree as NewickTree
 from ..rng import RNG
 from ..stats.distributions import Sample
 
 class Tree:
     def __init__(self, names: list[str], rng: RNG): ...
-    @classmethod
-    def from_json(_cls, json: str) -> Tree: ...
-    def to_json(self) -> str: ...
     def set_random_topology(self, rng: RNG): ...
     def set_random_edges(self, rng: RNG): ...
     def set_random_heights(self, diff, rng: RNG): ...
@@ -69,6 +65,7 @@ class Tree:
     def accept(self) -> None: ...
     def reject(self) -> None: ...
     def set(self, other: Tree) -> None: ...
+    def load(self, bytes: bytes) -> None: ...
 
 class Leaf(Hashable): ...
 class Internal(Hashable): ...
@@ -88,18 +85,6 @@ class CPU4Likelihood(Likelihood):
         substitution: Substiution4,
         clock: Clock,
         tree: Tree,
-        scale_ln: int = 30,
-    ): ...
-
-class Parallel4Likelihood(Likelihood):
-    def __init__(
-        self,
-        msa: MSA,
-        substitution: Substiution4,
-        clock: Clock,
-        tree: Tree,
-        num_leaf_threads: int = 0,
-        num_internal_threads: int = 3,
         scale_ln: int = 30,
     ): ...
 
@@ -132,7 +117,7 @@ class MCMC:
     @property
     def current_step(self) -> int: ...
     @property
-    def state(self) -> list[Parameter]: ...
+    def parameters(self) -> list[Parameter]: ...
     @property
     def priors(self) -> list[Prior]: ...
     @property
@@ -154,7 +139,8 @@ class MCMC:
         self,
     ) -> list[tuple[Operator, list[int], timedelta, timedelta]]: ...
     def run(self, n: int) -> None: ...
-    def measure_operator(self, operator_index: int, length: int) -> list[int]: ...
+    def dump_state(self) -> bytes: ...
+    def load_state(self, state: bytes) -> None: ...
 
 @dataclass
 class EpochScale(Operator):
@@ -168,6 +154,12 @@ class EpochScale(Operator):
 class SubtreeLeap(Operator):
     tree: Tree
     distribution: Sample[float]
+    rng: RNG
+    weight: float = 1
+
+@dataclass(slots=True)
+class FixedHeightSPR(Operator):
+    tree: Tree
     rng: RNG
     weight: float = 1
 
@@ -203,8 +195,17 @@ class K80:
 
 @dataclass
 class HKY:
-    frequencies: RealVector | tuple[float, float, float, float]
+    frequencies: RealVector
     kappa: Real
+
+@dataclass
+class GTR:
+    frequencies: RealVector
+    a: Real
+    b: Real
+    c: Real
+    d: Real
+    e: Real
 
 class ClassVector(Sized):
     def into_list(self) -> list[int]: ...
@@ -233,3 +234,14 @@ class RealVector(Sized):
 class Clock:
     @classmethod
     def Strict(_cls, rate: Real) -> Clock: ...
+
+class TraceWriter(Callback):
+    def __init__(
+        self,
+        items: dict[str, Parameter | Prior],
+        path: str,
+        *,
+        overwrite: bool = False,
+        zstd: bool = False,
+        every: int,
+    ): ...

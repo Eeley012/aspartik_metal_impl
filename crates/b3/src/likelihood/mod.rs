@@ -1,31 +1,26 @@
-#![expect(unused)]
-
 use anyhow::Result;
 use num_traits::Float;
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 
-use std::{collections::HashMap, fmt::Debug, slice};
+use std::{collections::HashMap, slice};
 
 use crate::{
 	Transitions,
 	clock::PyClock,
-	parameters::PyTree,
+	parameters::{Parameter, PyTree, Tree},
 	substitution::{PySubstitution4, SubstitutionModel},
 };
 use data::{DnaNucleotide, Msa, PyMsa, seq::Character};
-use logger::{info, trace};
 
 mod cpu;
 mod cuda;
 mod metal;
 mod hetero;
-mod parallel;
 
 use cpu::CpuLikelihood;
 use cuda::CudaLikelihood;
 pub use hetero::PyHeteroLikelihood;
-use parallel::ParallelLikelihood;
 
 /// Felsenstein's pruning tree likelihood calculator
 ///
@@ -49,60 +44,30 @@ use parallel::ParallelLikelihood;
 /// several calculators.  In this case, they'll first call `propose` on each
 /// calculator and then block on `likelihood` calls.
 pub trait Calculator<const N: usize, F> {
-	/// Launch a tree likelihood update
-	///
-	/// ## Parameters
-	///
-	/// - `nodes` is the list of nodes whose projections will be updated.
-	///   They are ordered by dependency: if `i < j`, then `nodes[i]` is
-	///   either a descendant of or unrelated to `nodes[j]`.  The last node
-	///   is always the root.  Additionally, all leaf nodes are located in a
-	///   single prefix of `nodes` without any internal nodes in-between.
-	///
-	/// - `children` is a list of tuples with children of each internal node
-	///   in `nodes`.
-	///
-	/// - `transitions` are transition matrices for the parent edges of
-	///   `nodes`.  The length of `transitions` is equal to `nodes.len() -
-	///   1` because the final root node has no parent edge.
-	///
-	/// - `leaves_end` is the number of leaves in `nodes` and the index of
-	///   the first internal node.
-	///
-	/// - `frequencies` are the presumed frequencies of states in the root
-	///   sequence.
-	fn propose(
+	/// Calculate tree likelihood
+	fn likelihood(
 		&mut self,
-		nodes: &[usize],
-		children: &[(usize, usize)],
-		transitions: &[[[F; N]; N]],
-		leaves_end: usize,
-		frequencies: [F; N],
-	) -> Result<()>;
+		tree: &Tree,
+		transitions: &Transitions<N, F>,
+	) -> Result<f64>;
 
-	/// Write back the likelihoods for each pattern
-	///
-	/// `patterns` is a mutable slice with length equal to the number of
-	/// patterns in the alignment passed to the calculator.
-	fn likelihood(&mut self, patterns: &mut [f64]) -> Result<()>;
-
-	/// Accept the changes made in `propose`
+	/// Accept the changes made in `likelihood`
 	fn accept(&mut self) -> Result<()>;
 
-	/// Reject the changes made in `propose`
+	/// Reject the changes made in `likelihood`
 	///
 	/// This should roll back the internal state of the calculator to
 	/// exactly what it was after the last call to `accept`.
 	fn reject(&mut self) -> Result<()>;
+
+	/// Number of patterns in the alignment
+	fn num_patterns(&self) -> usize;
 }
 
-pub struct GenericLikelihood<const N: usize, F, L, S> {
+pub struct GenericLikelihood<const N: usize, F, L> {
 	calculator: L,
-	pattern_likelihoods: Vec<f64>,
-	backup_pattern_likelihoods: Vec<f64>,
-	pattern_weights: Vec<u32>,
 
-	transitions: Transitions<N, F, S>,
+	transitions: Transitions<N, F>,
 	tree: Py<PyTree>,
 
 	/// Last accepted likelihood
@@ -113,24 +78,20 @@ pub struct GenericLikelihood<const N: usize, F, L, S> {
 	launched_update: bool,
 }
 
-impl<const N: usize, F, L, S> GenericLikelihood<N, F, L, S>
+impl<const N: usize, F, L> GenericLikelihood<N, F, L>
 where
 	F: Float + Default,
 	L: Calculator<N, F>,
-	S: SubstitutionModel<N, F>,
 {
-	fn new(
+	fn new<S>(
 		calculator: L,
-		weights: Vec<u32>,
 		substitution: S,
 		clock: Py<PyClock>,
 		tree: Py<PyTree>,
-	) -> Result<Self> {
-		info!(
-			target: "b3::likelihood::GenericLikelihood::new",
-			weights_len = weights.len()
-		);
-
+	) -> Result<Self>
+	where
+		S: SubstitutionModel<N, F> + Sync + Send + 'static,
+	{
 		let transitions = Transitions::new(
 			tree.get().num_nodes(),
 			substitution,
@@ -139,12 +100,6 @@ where
 
 		let mut out = Self {
 			calculator,
-			pattern_likelihoods: vec![f64::NAN; weights.len()],
-			backup_pattern_likelihoods: vec![
-				f64::NAN;
-				weights.len()
-			],
-			pattern_weights: weights,
 
 			transitions,
 			tree,
@@ -153,71 +108,30 @@ where
 			last: f64::NAN,
 			launched_update: false,
 		};
-		out.propose()?;
 		// This cannot be removed: the likelihood must be run to
 		// completion in case the calculator is async.
 		out.likelihood()?;
-		// propose sets `last` and accept updates the cache, so neither
-		// cache nor last will be NaN.
+		// likelihood sets `last` and accept updates the cache, so
+		// neither cache nor last will be NaN.
 		out.accept()?;
 		Ok(out)
 	}
 
-	fn propose(&mut self) -> Result<()> {
+	fn likelihood(&mut self) -> Result<f64> {
 		let tree = &mut self.tree.get().inner();
 		self.transitions.update(tree)?;
-		let (nodes, leaves_end) = tree.nodes_to_update();
-
-		trace!(
-			target: "b3::likelihood::propose",
-			num_nodes_to_update = nodes.len()
-		);
+		tree.mark_transitively_updated_nodes();
 
 		// no tree update, return the cache
-		if nodes.is_empty() {
+		if !tree.is_changed() {
 			self.launched_update = false;
-			return Ok(());
-		}
-
-		let (nodes, children) = tree.to_lists(&nodes);
-
-		let transitions =
-			self.transitions.matrices(&nodes[..nodes.len() - 1]);
-
-		let frequencies = self.transitions.frequencies();
-
-		assert_eq!(nodes.len() - leaves_end, children.len());
-		assert_eq!(nodes.len() - 1, transitions.len());
-
-		self.calculator.propose(
-			&nodes,
-			&children,
-			&transitions,
-			leaves_end,
-			frequencies,
-		)?;
-		self.launched_update = true;
-
-		Ok(())
-	}
-
-	fn likelihood(&mut self) -> Result<f64> {
-		if !self.launched_update {
 			self.last = self.cache;
 			return Ok(self.cache);
 		}
 
-		self.calculator.likelihood(&mut self.pattern_likelihoods)?;
-
-		for (likelihood, weight) in self
-			.pattern_likelihoods
-			.iter_mut()
-			.zip(&self.pattern_weights)
-		{
-			*likelihood *= f64::from(*weight);
-		}
-
-		self.last = self.pattern_likelihoods.iter().sum();
+		self.launched_update = true;
+		self.last =
+			self.calculator.likelihood(tree, &self.transitions)?;
 		Ok(self.last)
 	}
 
@@ -226,8 +140,6 @@ where
 		if self.launched_update {
 			self.calculator.accept()?;
 			self.transitions.accept();
-			self.backup_pattern_likelihoods
-				.copy_from_slice(&self.pattern_likelihoods);
 		}
 		self.launched_update = false;
 		Ok(())
@@ -237,20 +149,13 @@ where
 		if self.launched_update {
 			self.calculator.reject()?;
 			self.transitions.reject();
-			self.pattern_likelihoods.copy_from_slice(
-				&self.backup_pattern_likelihoods,
-			);
 		}
 		self.launched_update = false;
 		Ok(())
 	}
 
 	fn num_patterns(&self) -> usize {
-		self.pattern_weights.len()
-	}
-
-	fn pattern_likelihoods(&self) -> Result<Vec<f64>> {
-		Ok(self.pattern_likelihoods.clone())
+		self.calculator.num_patterns()
 	}
 }
 
@@ -311,10 +216,6 @@ macro_rules! likelihood_methods {
 	($type:ty) => {
 		#[pymethods]
 		impl $type {
-			fn propose(&self) -> Result<()> {
-				self.inner.lock().propose()
-			}
-
 			fn likelihood(&self) -> Result<f64> {
 				self.inner.lock().likelihood()
 			}
@@ -326,15 +227,15 @@ macro_rules! likelihood_methods {
 			fn reject(&self) -> Result<()> {
 				self.inner.lock().reject()
 			}
+
+			pub fn num_patterns(&self) -> usize {
+				self.inner.lock().num_patterns()
+			}
 		}
 
 		impl $type {
 			pub fn pattern_likelihoods(&self) -> Result<Vec<f64>> {
-				self.inner.lock().pattern_likelihoods()
-			}
-
-			pub fn num_patterns(&self) -> usize {
-				self.inner.lock().num_patterns()
+				todo!()
 			}
 		}
 	};
@@ -346,14 +247,7 @@ macro_rules! likelihood_methods {
 /// for alignments larger than 100Kb.
 #[pyclass(name = "CPU4Likelihood", module = "aspartik.b3.likelihoods", frozen)]
 pub struct PyCpu4Likelihood {
-	inner: Mutex<
-		GenericLikelihood<
-			4,
-			f64,
-			CpuLikelihood<4, f64>,
-			PySubstitution4,
-		>,
-	>,
+	inner: Mutex<GenericLikelihood<4, f64, CpuLikelihood<4, f64>>>,
 }
 
 #[pymethods]
@@ -368,11 +262,9 @@ impl PyCpu4Likelihood {
 		scale_ln: u32,
 	) -> Result<Self> {
 		let (leaves, weights) = deduplicate(msa.get());
-		let calculator =
-			CpuLikelihood::new(weights.len(), leaves, scale_ln);
+		let calculator = CpuLikelihood::new(weights, leaves, scale_ln);
 		let generic = GenericLikelihood::new(
 			calculator,
-			weights,
 			substitution,
 			clock,
 			tree,
@@ -386,75 +278,13 @@ impl PyCpu4Likelihood {
 
 likelihood_methods!(PyCpu4Likelihood);
 
-#[pyclass(
-	name = "Parallel4Likelihood",
-	module = "aspartik.b3.likelihoods",
-	frozen
-)]
-pub struct PyParallel4Likelihood {
-	inner: Mutex<
-		GenericLikelihood<
-			4,
-			f64,
-			ParallelLikelihood<4, f64>,
-			PySubstitution4,
-		>,
-	>,
-}
-
-#[pymethods]
-impl PyParallel4Likelihood {
-	#[new]
-	#[pyo3(signature = (
-		msa, substitution, clock, tree,
-		num_leaf_threads = 0, num_internal_threads = 3, scale_ln = 30
-	))]
-	fn new(
-		msa: Py<PyMsa>,
-		substitution: PySubstitution4,
-		clock: Py<PyClock>,
-		tree: Py<PyTree>,
-		mut num_leaf_threads: usize,
-		num_internal_threads: usize,
-		scale_ln: u32,
-	) -> Result<Self> {
-		if num_leaf_threads == 0 {
-			num_leaf_threads = num_internal_threads;
-		}
-
-		let (leaves, weights) = deduplicate(msa.get());
-		let calculator = ParallelLikelihood::new(
-			weights.len(),
-			leaves,
-			num_leaf_threads,
-			num_internal_threads,
-			scale_ln,
-		)?;
-		let generic = GenericLikelihood::new(
-			calculator,
-			weights,
-			substitution,
-			clock,
-			tree,
-		)?;
-
-		Ok(Self {
-			inner: Mutex::new(generic),
-		})
-	}
-}
-
-likelihood_methods!(PyParallel4Likelihood);
-
 /// Likelihood calculations on NVIDIA graphics cards.
 ///
 /// Only supports 4-state DNA models.  `cuda_device` allows selecting the device
 /// index.
 #[pyclass(name = "CUDALikelihood", module = "aspartik.b3.likelihoods", frozen)]
 pub struct PyCudaLikelihood {
-	inner: Mutex<
-		GenericLikelihood<4, f64, CudaLikelihood, PySubstitution4>,
-	>,
+	inner: Mutex<GenericLikelihood<4, f64, CudaLikelihood>>,
 }
 
 #[pymethods]
@@ -476,14 +306,13 @@ impl PyCudaLikelihood {
 	) -> Result<Self> {
 		let (leaves, weights) = deduplicate(msa.get());
 		let calculator = CudaLikelihood::new(
-			weights.len(),
+			weights,
 			leaves,
 			scale_ln,
 			cuda_device,
 		)?;
 		let generic = GenericLikelihood::new(
 			calculator,
-			weights,
 			substitution,
 			clock,
 			tree,
@@ -497,29 +326,11 @@ impl PyCudaLikelihood {
 
 likelihood_methods!(PyCudaLikelihood);
 
+#[derive(FromPyObject)]
 pub enum PyLikelihood {
 	Cpu(Py<PyCpu4Likelihood>),
-	Parallel(Py<PyParallel4Likelihood>),
 	Cuda(Py<PyCudaLikelihood>),
 	Hetero(Py<PyHeteroLikelihood>),
-}
-
-impl<'py> FromPyObject<'_, 'py> for PyLikelihood {
-	type Error = PyErr;
-
-	fn extract(obj: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
-		if let Ok(l) = obj.cast::<PyCpu4Likelihood>() {
-			Ok(Self::Cpu(l.into()))
-		} else if let Ok(l) = obj.cast::<PyParallel4Likelihood>() {
-			Ok(Self::Parallel(l.into()))
-		} else if let Ok(l) = obj.cast::<PyCudaLikelihood>() {
-			Ok(Self::Cuda(l.into()))
-		} else if let Ok(l) = obj.cast::<PyHeteroLikelihood>() {
-			Ok(Self::Hetero(l.into()))
-		} else {
-			todo!("descriptive error")
-		}
-	}
 }
 
 impl<'py> IntoPyObject<'py> for PyLikelihood {
@@ -528,13 +339,11 @@ impl<'py> IntoPyObject<'py> for PyLikelihood {
 	type Error = PyErr;
 
 	fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, PyErr> {
-		let any = match self {
-			Self::Cpu(l) => l.clone_ref(py).into_any(),
-			Self::Parallel(l) => l.clone_ref(py).into_any(),
-			Self::Cuda(l) => l.clone_ref(py).into_any(),
-			Self::Hetero(l) => l.clone_ref(py).into_any(),
-		};
-		Ok(any.into_bound(py))
+		Ok(match self {
+			Self::Cpu(l) => l.into_bound(py).into_any(),
+			Self::Cuda(l) => l.into_bound(py).into_any(),
+			Self::Hetero(l) => l.into_bound(py).into_any(),
+		})
 	}
 }
 
@@ -542,25 +351,14 @@ impl PyLikelihood {
 	pub fn clone_ref(&self, py: Python) -> Self {
 		match self {
 			Self::Cpu(l) => Self::Cpu(l.clone_ref(py)),
-			Self::Parallel(l) => Self::Parallel(l.clone_ref(py)),
 			Self::Cuda(l) => Self::Cuda(l.clone_ref(py)),
 			Self::Hetero(l) => Self::Hetero(l.clone_ref(py)),
-		}
-	}
-
-	pub fn propose(&self) -> Result<()> {
-		match self {
-			Self::Cpu(l) => l.get().propose(),
-			Self::Parallel(l) => l.get().propose(),
-			Self::Cuda(l) => l.get().propose(),
-			Self::Hetero(l) => l.get().propose(),
 		}
 	}
 
 	pub fn likelihood(&self) -> Result<f64> {
 		match self {
 			Self::Cpu(l) => l.get().likelihood(),
-			Self::Parallel(l) => l.get().likelihood(),
 			Self::Cuda(l) => l.get().likelihood(),
 			Self::Hetero(l) => l.get().likelihood(),
 		}
@@ -569,7 +367,6 @@ impl PyLikelihood {
 	pub fn accept(&self) -> Result<()> {
 		match self {
 			Self::Cpu(l) => l.get().accept(),
-			Self::Parallel(l) => l.get().accept(),
 			Self::Cuda(l) => l.get().accept(),
 			Self::Hetero(l) => l.get().accept(),
 		}
@@ -578,7 +375,6 @@ impl PyLikelihood {
 	pub fn reject(&self) -> Result<()> {
 		match self {
 			Self::Cpu(l) => l.get().reject(),
-			Self::Parallel(l) => l.get().reject(),
 			Self::Cuda(l) => l.get().reject(),
 			Self::Hetero(l) => l.get().reject(),
 		}
@@ -587,16 +383,14 @@ impl PyLikelihood {
 	pub fn num_patterns(&self) -> usize {
 		match self {
 			Self::Cpu(l) => l.get().num_patterns(),
-			Self::Parallel(l) => l.get().num_patterns(),
 			Self::Cuda(l) => l.get().num_patterns(),
-			Self::Hetero(_l) => todo!(),
+			Self::Hetero(l) => l.get().num_patterns(),
 		}
 	}
 
 	pub fn pattern_likelihoods(&self) -> Result<Vec<f64>> {
 		match self {
 			Self::Cpu(l) => l.get().pattern_likelihoods(),
-			Self::Parallel(l) => l.get().pattern_likelihoods(),
 			Self::Cuda(l) => l.get().pattern_likelihoods(),
 			Self::Hetero(_l) => todo!(),
 		}

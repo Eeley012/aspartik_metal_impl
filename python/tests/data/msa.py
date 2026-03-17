@@ -1,6 +1,4 @@
-import pickle
-
-from aspartik.io.msa import read_msa_from_fasta
+from aspartik.io import read_msa_from_fasta
 
 
 def test_eq():

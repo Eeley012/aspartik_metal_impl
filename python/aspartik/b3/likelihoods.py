@@ -8,7 +8,6 @@ from .._aspartik_rust_impl._b3_rust_impl import (
     CPU4Likelihood as CPU4Likelihood,
     CUDALikelihood as CUDALikelihood,
     HeteroLikelihood as HeteroLikelihood,
-    Parallel4Likelihood as Parallel4Likelihood,
 )
 from . import Stateful
 
@@ -42,4 +41,8 @@ class Likelihood(Stateful, Protocol):
         a result of the proposal.  If `accept` or `reject` was called last,
         this method must return the last accepted likelihood.
         """
+        ...
+
+    def num_patterns(self) -> int:
+        """Number of unique state patterns in the underlying alignment"""
         ...

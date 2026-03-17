@@ -1,7 +1,11 @@
+import pandas as pd
 import pytest
-from utils import random_trees
+from utils import random_msas, random_trees
 
+from aspartik.b3.config import b3_config
 from aspartik.b3.parameters import Tree
+from aspartik.data.msa import MSA
+from aspartik.rng import RNG
 
 
 def test_other_child(rng):
@@ -55,3 +59,30 @@ def test_swap_parents(tree, rng):
 
     assert a_parent == new_b_parent
     assert b_parent == new_a_parent
+
+
+# TODO: raise when scaling gets re-implemented
+@pytest.mark.parametrize("msa", random_msas(10, 100, num=20))
+def test_dump_load_mcmc(msa: MSA, rng: RNG, tmp_path):
+    trace_file = tmp_path / "dump_load.trace"
+    mcmc = b3_config(
+        msa,
+        tree_prior="constant",
+        substitution_model="JC",
+        trace_path=trace_file,
+        trace_every=100,
+        print_every=None,
+    )
+    mcmc.run(100)
+    tree = mcmc.parameters[0]
+    assert isinstance(tree, Tree)
+
+    df = pd.read_feather(trace_file)
+
+    serialized_tree = df.iloc[-1]["tree"]
+    deserialized_tree = Tree(msa.sequence_names(), rng)
+    deserialized_tree.load(serialized_tree)
+
+    assert tree.newick() == deserialized_tree.newick()
+
+    trace_file.unlink()

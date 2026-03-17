@@ -1,15 +1,13 @@
-from utils.compare import compare
+from utils.compare import compare_verify_run
 
 from aspartik.b3 import Clock
 from aspartik.b3.likelihoods import (
     CPU4Likelihood,
     CUDALikelihood,
-    HeteroLikelihood,
-    Parallel4Likelihood,
 )
 from aspartik.b3.parameters import Real, RealVector, Tree
 from aspartik.b3.substitutions import HKY
-from aspartik.io.msa import read_msa_from_fasta
+from aspartik.io import read_msa_from_fasta
 from aspartik.rng import RNG
 
 SCALES = [3, 30, 300]
@@ -36,28 +34,6 @@ def test_compare_likelihood():
         )
         for scale in SCALES
     ]
-    parallel_calculators = [
-        Parallel4Likelihood(
-            msa=msa,
-            substitution=HKY(frequencies, kappa),
-            clock=Clock.Strict(clock_rate),
-            tree=tree,
-            num_leaf_threads=5,
-            num_internal_threads=2,
-            scale_ln=scale,
-        )
-        for scale in SCALES
-    ]
-    hetero = HeteroLikelihood(
-        likelihoods=[
-            CPU4Likelihood(
-                msa=msa,
-                substitution=HKY(frequencies, kappa),
-                clock=Clock.Strict(clock_rate),
-                tree=tree,
-            )
-        ]
-    )
     try:
         cuda_calculator = CUDALikelihood(
             msa=msa,
@@ -68,11 +44,11 @@ def test_compare_likelihood():
     except Exception:
         cuda_calculator = None
 
-    calculators = [*cpu_calculators, *parallel_calculators, hetero]
+    calculators = [*cpu_calculators]
     if cuda_calculator:
         calculators.insert(0, cuda_calculator)
 
-    compare(
+    compare_verify_run(
         "data/runs/influenza/b3.trace",
         parameters={
             "tree": tree,

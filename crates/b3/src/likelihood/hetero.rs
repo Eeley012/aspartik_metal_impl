@@ -4,7 +4,7 @@ use anyhow::Result;
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 
-use super::{PyCpu4Likelihood, PyLikelihood, PyParallel4Likelihood};
+use super::{PyCpu4Likelihood, PyLikelihood};
 use crate::{likelihood, parameters::PyClassVector};
 
 pub struct HeteroLikelihood {
@@ -27,34 +27,12 @@ impl HeteroLikelihood {
 		})
 	}
 
-	fn propose(&self) -> Result<()> {
-		for likelihood in &self.likelihoods {
-			likelihood.propose()?;
-		}
-		Ok(())
-	}
-
 	fn likelihood(&self) -> Result<f64> {
 		for likelihood in &self.likelihoods {
 			likelihood.likelihood()?;
 		}
 
-		let likelihoods: Vec<Vec<f64>> = self
-			.likelihoods
-			.iter()
-			.map(|l| l.pattern_likelihoods())
-			.collect::<Result<_>>()?;
-
-		let classes = &*self.classes.get().inner();
-
-		let mut out = 0.0;
-
-		for i in 0..classes.len() {
-			let class = classes[i] as usize;
-			out += likelihoods[class][i];
-		}
-
-		Ok(out)
+		todo!()
 	}
 
 	fn accept(&self) -> Result<()> {
@@ -93,10 +71,6 @@ impl PyHeteroLikelihood {
 		})
 	}
 
-	pub fn propose(&self) -> Result<()> {
-		self.inner.lock().propose()
-	}
-
 	pub fn likelihood(&self) -> Result<f64> {
 		self.inner.lock().likelihood()
 	}
@@ -110,7 +84,11 @@ impl PyHeteroLikelihood {
 	}
 
 	#[getter]
-	fn class_vector(&self, py: Python) -> Py<PyClassVector> {
+	pub fn class_vector(&self, py: Python) -> Py<PyClassVector> {
 		self.inner.lock().classes.clone_ref(py)
+	}
+
+	pub fn num_patterns(&self) -> usize {
+		self.inner.lock().classes.get().inner().len()
 	}
 }

@@ -7,6 +7,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+math = { workspace = true, features = ["python"] }
 util = { workspace = true }
 
 anyhow = { workspace = true }
@@ -14,4 +15,4 @@ parking_lot = { workspace = true }
 pyo3 = { workspace = true, features = ["anyhow"] }
 rand = { workspace = true, features = ["std", "sys_rng"] }
 rand_pcg = { workspace = true, features = ["serde"] }
-verbatim = { workspace = true, features = ["alloc"] }
+serde_verbatim = { workspace = true, features = ["alloc"] }

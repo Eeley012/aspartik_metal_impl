@@ -1,6 +1,6 @@
 use anyhow::Result;
 use linalg::{RowMatrix, Vector};
-use pyo3::{conversion::FromPyObject, prelude::*};
+use pyo3::prelude::*;
 
 use crate::parameters::{Parameter, PyReal, PyRealVector};
 
@@ -16,26 +16,12 @@ pub trait SubstitutionModel<const N: usize, F> {
 	fn reject(&mut self);
 }
 
+#[derive(FromPyObject)]
 pub enum PySubstitution4 {
 	JC(Py<PyJC>),
 	K80(Py<PyK80>),
 	HKY(Py<PyHKY>),
-}
-
-impl<'py> FromPyObject<'_, 'py> for PySubstitution4 {
-	type Error = PyErr;
-
-	fn extract(obj: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
-		if let Ok(class_vector) = obj.cast::<PyJC>() {
-			Ok(Self::JC(class_vector.into()))
-		} else if let Ok(real) = obj.cast::<PyK80>() {
-			Ok(Self::K80(real.into()))
-		} else if let Ok(real_vector) = obj.cast::<PyHKY>() {
-			Ok(Self::HKY(real_vector.into()))
-		} else {
-			todo!("descriptive error")
-		}
-	}
+	GTR(Py<PyGTR>),
 }
 
 impl<'py> IntoPyObject<'py> for PySubstitution4 {
@@ -44,12 +30,12 @@ impl<'py> IntoPyObject<'py> for PySubstitution4 {
 	type Error = PyErr;
 
 	fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, PyErr> {
-		let any = match self {
-			Self::JC(p) => p.clone_ref(py).into_any(),
-			Self::K80(p) => p.clone_ref(py).into_any(),
-			Self::HKY(p) => p.clone_ref(py).into_any(),
-		};
-		Ok(any.into_bound(py))
+		Ok(match self {
+			Self::JC(p) => p.into_bound(py).into_any(),
+			Self::K80(p) => p.into_bound(py).into_any(),
+			Self::HKY(p) => p.into_bound(py).into_any(),
+			Self::GTR(p) => p.into_bound(py).into_any(),
+		})
 	}
 }
 
@@ -59,6 +45,7 @@ impl SubstitutionModel<4, f64> for PySubstitution4 {
 			Self::JC(m) => m.get().inner().update(),
 			Self::K80(m) => m.get().inner().update(),
 			Self::HKY(m) => m.get().inner().update(),
+			Self::GTR(m) => m.get().inner().update(),
 		}
 	}
 
@@ -71,6 +58,9 @@ impl SubstitutionModel<4, f64> for PySubstitution4 {
 			Self::HKY(m) => {
 				m.get().inner().get_transition(distance)
 			}
+			Self::GTR(m) => {
+				m.get().inner().get_transition(distance)
+			}
 		}
 	}
 
@@ -79,6 +69,7 @@ impl SubstitutionModel<4, f64> for PySubstitution4 {
 			Self::JC(m) => m.get().inner().get_frequencies(),
 			Self::K80(m) => m.get().inner().get_frequencies(),
 			Self::HKY(m) => m.get().inner().get_frequencies(),
+			Self::GTR(m) => m.get().inner().get_frequencies(),
 		}
 	}
 
@@ -87,6 +78,7 @@ impl SubstitutionModel<4, f64> for PySubstitution4 {
 			Self::JC(m) => m.get().inner().accept(),
 			Self::K80(m) => m.get().inner().accept(),
 			Self::HKY(m) => m.get().inner().accept(),
+			Self::GTR(m) => m.get().inner().accept(),
 		}
 	}
 
@@ -95,6 +87,7 @@ impl SubstitutionModel<4, f64> for PySubstitution4 {
 			Self::JC(m) => m.get().inner().reject(),
 			Self::K80(m) => m.get().inner().reject(),
 			Self::HKY(m) => m.get().inner().reject(),
+			Self::GTR(m) => m.get().inner().reject(),
 		}
 	}
 }
@@ -364,3 +357,134 @@ impl SubstitutionModel<4, f64> for HKY {
 }
 
 create_pysubstitution!(PyHKY, HKY, "HKY", frequencies: Py<PyRealVector>, kappa: Py<PyReal>);
+
+#[derive(Debug)]
+#[pyclass(module = "aspartik.b3.substitutions", frozen)]
+pub struct GTR {
+	/// DNA nucleotide frequencies
+	#[pyo3(get)]
+	frequencies: Py<PyRealVector>,
+
+	a: Py<PyReal>,
+	b: Py<PyReal>,
+	c: Py<PyReal>,
+	d: Py<PyReal>,
+	e: Py<PyReal>,
+
+	p: RowMatrix<f64, 4, 4>,
+	inv_p: RowMatrix<f64, 4, 4>,
+	diag: Vector<f64, 4>,
+
+	has_changed: bool,
+}
+
+impl GTR {
+	fn new(
+		frequencies: Py<PyRealVector>,
+		a: Py<PyReal>,
+		b: Py<PyReal>,
+		c: Py<PyReal>,
+		d: Py<PyReal>,
+		e: Py<PyReal>,
+	) -> Self {
+		let mut out = Self {
+			frequencies,
+			a,
+			b,
+			c,
+			d,
+			e,
+
+			p: RowMatrix::default(),
+			inv_p: RowMatrix::default(),
+			diag: Vector::default(),
+
+			has_changed: false,
+		};
+		out.update_matrices();
+		out
+	}
+
+	fn update_matrices(&mut self) {
+		let [p_a, p_c, p_g, p_t] = self.get_frequencies();
+		let a = self.a.get().inner().value();
+		let b = self.b.get().inner().value();
+		let c = self.c.get().inner().value();
+		let d = self.d.get().inner().value();
+		let e = self.e.get().inner().value();
+
+		let gtr = RowMatrix::from([
+			[
+				-a * p_c - b * p_g - c * p_t,
+				a * p_c,
+				b * p_g,
+				c * p_t,
+			],
+			[
+				a * p_a,
+				-a * p_a - d * p_g + e * p_t,
+				d * p_g,
+				e * p_t,
+			],
+			[b * p_a, d * p_c, -b * p_a - d * p_c - p_t, p_t],
+			[c * p_a, e * p_c, p_g, -c * p_a - e * p_c - p_g],
+		]);
+		let div = 2.0
+			* (a * p_a * p_c
+				+ b * p_a * p_g + c * p_a * p_t
+				+ d * p_c * p_g + e * p_c * p_t
+				+ p_g * p_t);
+		let gtr = gtr.map(|e| e / div);
+
+		let (eigenvalues, eigenvectors) = gtr.eigen();
+
+		self.diag = eigenvalues;
+		self.p = eigenvectors;
+		self.inv_p = eigenvectors.inverse();
+	}
+}
+
+impl SubstitutionModel<4, f64> for GTR {
+	fn update(&mut self) -> Result<bool> {
+		if self.frequencies.get().inner().is_changed()
+			|| self.a.get().inner().is_changed()
+			|| self.b.get().inner().is_changed()
+			|| self.c.get().inner().is_changed()
+			|| self.d.get().inner().is_changed()
+			|| self.e.get().inner().is_changed()
+		{
+			self.update_matrices();
+			self.has_changed = true;
+			Ok(true)
+		} else {
+			Ok(false)
+		}
+	}
+
+	fn get_transition(&self, distance: f64) -> [[f64; 4]; 4] {
+		let diag = RowMatrix::from_diagonal(
+			self.diag.map(|v| (v * distance).exp()),
+		);
+
+		(self.p * diag * self.inv_p).into()
+	}
+
+	fn get_frequencies(&self) -> [f64; 4] {
+		let freqs = &*self.frequencies.get().inner();
+		[freqs[0], freqs[1], freqs[2], freqs[3]]
+	}
+
+	fn accept(&mut self) {}
+
+	fn reject(&mut self) {
+		if self.has_changed {
+			self.update_matrices();
+		}
+	}
+}
+
+create_pysubstitution!(
+	PyGTR, GTR, "GTR",
+	frequencies: Py<PyRealVector>,
+	a: Py<PyReal>, b: Py<PyReal>, c: Py<PyReal>, d: Py<PyReal>, e: Py<PyReal>
+);

@@ -4,14 +4,17 @@ use pyo3::{IntoPyObjectExt, prelude::*, types::PyList};
 use rand::RngExt;
 use serde::{Deserialize, Serializer, ser::SerializeSeq};
 
+use std::{fs, path::Path};
+
 use crate::{
-	PyCallback, PyPrior,
+	PyCallback,
 	likelihood::PyLikelihood,
-	operator::{Proposal, PyOperator, WeightedScheduler},
+	operators::{Proposal, PyOperator, WeightedScheduler},
 	parameters::PyParameter,
+	priors::PyPrior,
 };
 use rng::{PyRng, Rng};
-use util::time;
+use util::{seconds_since_unix, time};
 
 /// The main object which runs the analysis
 #[pyclass(name = "MCMC", module = "aspartik.b3", frozen)]
@@ -68,6 +71,15 @@ impl Mcmc {
 		*self.current_step.lock()
 	}
 
+	#[getter]
+	fn parameters(&self, py: Python) -> Result<Vec<Py<PyAny>>> {
+		let mut out = Vec::with_capacity(self.state.len());
+		for param in &self.state {
+			out.push(param.into_py_any(py));
+		}
+		Ok(out)
+	}
+
 	/// All priors
 	#[getter]
 	fn priors(&self, py: Python) -> Vec<Py<PyAny>> {
@@ -96,57 +108,18 @@ impl Mcmc {
 	/// This yields flow control to the Rust core until the simulation is
 	/// done.  Press Ctrl+C to interrupt and stop the execution.
 	fn run(this: Py<Self>, py: Python, n: usize) -> Result<()> {
-		let self_ = this.get();
-		let end = self_.current_step() + n;
-		loop {
-			let current_step = *self_.current_step.lock();
-
-			let operator_index =
-				self_.scheduler.random_operator_index(
-					&mut self_.rng.get().inner(),
-				);
-
-			let result = self_
-				.step(py, operator_index)
-				.with_context(|| {
-					anyhow!("Failed on step {current_step}")
-				})?;
-
-			self_.finalize(py, operator_index, result)?;
-
-			Self::call_callbacks(
-				this.clone_ref(py),
-				py,
-				current_step,
-			)?;
-
-			if current_step == end {
-				break;
+		match Self::try_run(this.clone_ref(py), py, n) {
+			Ok(()) => Ok(()),
+			Err(err) => {
+				let self_ = this.get();
+				self_.finish_run(py, this.clone_ref(py))?;
+				self_.dump_state_to_file(format!(
+					"b3-error-{}.state",
+					seconds_since_unix(),
+				))?;
+				Err(err)
 			}
-			*self_.current_step.lock() += 1;
 		}
-
-		self_.finish(py)?;
-
-		Ok(())
-	}
-
-	/// TODO: refine and document
-	fn measure_operator(
-		&self,
-		py: Python,
-		operator_index: usize,
-		length: usize,
-	) -> Result<[usize; 5]> {
-		let mut out = [0; 5];
-
-		for _ in 0..length {
-			let result = self.step(py, operator_index)?;
-			self.finalize(py, operator_index, StepResult::Reject)?;
-			out[result.index()] += 1;
-		}
-
-		Ok(out)
 	}
 
 	/// Posterior probability for the last accepted step
@@ -192,7 +165,7 @@ impl Mcmc {
 	}
 
 	fn dump_state(&self) -> Result<Vec<u8>> {
-		let mut ser = verbatim::Serializer::new(Vec::new());
+		let mut ser = serde_verbatim::Serializer::new(Vec::new());
 		let mut scratch = Vec::new();
 
 		ser.serialize_u64(*self.current_step.lock() as u64)?;
@@ -222,7 +195,7 @@ impl Mcmc {
 			params: Vec<&'a [u8]>,
 			rng: Rng,
 		}
-		let mut deserializer = verbatim::Deserializer::new(bytes);
+		let mut deserializer = serde_verbatim::Deserializer::new(bytes);
 		let de = De::deserialize(&mut deserializer)?;
 
 		*self.current_step.lock() = de.current_step as usize;
@@ -235,7 +208,6 @@ impl Mcmc {
 
 		*self.rng.get().inner() = de.rng;
 
-		self.likelihood.propose()?;
 		self.likelihood.likelihood()?;
 		self.likelihood.accept()?;
 
@@ -272,6 +244,48 @@ impl StepResult {
 }
 
 impl Mcmc {
+	fn try_run(this: Py<Self>, py: Python, n: usize) -> Result<()> {
+		let self_ = this.get();
+		let end = self_.current_step() + n;
+		loop {
+			let current_step = *self_.current_step.lock();
+
+			let operator_index =
+				self_.scheduler.random_operator_index(
+					&mut self_.rng.get().inner(),
+				);
+
+			let result = self_
+				.step(py, operator_index)
+				.with_context(|| {
+					anyhow!("Failed on step {current_step}")
+				})?;
+
+			self_.finalize_step(py, operator_index, result)?;
+
+			Self::call_callbacks(
+				this.clone_ref(py),
+				py,
+				current_step,
+			)?;
+
+			if current_step == end {
+				break;
+			}
+			*self_.current_step.lock() += 1;
+		}
+
+		self_.finish_run(py, this.clone_ref(py))?;
+
+		Ok(())
+	}
+
+	fn dump_state_to_file(&self, path: impl AsRef<Path>) -> Result<()> {
+		let state = self.dump_state()?;
+		fs::write(path, state)?;
+		Ok(())
+	}
+
 	fn step(
 		&self,
 		py: Python,
@@ -298,10 +312,7 @@ impl Mcmc {
 			return Ok(PriorReject);
 		}
 
-		let (likelihood, time) = time! {{
-			self.likelihood.propose()?;
-			self.likelihood.likelihood()?
-		}};
+		let (likelihood, time) = time! {self.likelihood.likelihood()?};
 
 		if likelihood == f64::NEG_INFINITY {
 			bail!("Tree likelihood underflowed");
@@ -326,7 +337,7 @@ impl Mcmc {
 		}
 	}
 
-	fn finalize(
+	fn finalize_step(
 		&self,
 		py: Python,
 		operator_index: usize,
@@ -340,11 +351,19 @@ impl Mcmc {
 				parameter.accept();
 			}
 
+			for prior in &self.priors {
+				prior.accept(py)?;
+			}
+
 			self.likelihood.accept()?;
 		} else {
 			for parameter in &self.state {
 				let parameter = &mut *parameter.as_ref();
 				parameter.reject();
+			}
+
+			for prior in &self.priors {
+				prior.reject(py)?;
 			}
 
 			self.likelihood.reject()?;
@@ -374,9 +393,9 @@ impl Mcmc {
 		Ok(())
 	}
 
-	fn finish(&self, py: Python) -> Result<()> {
+	fn finish_run(&self, py: Python, mcmc: Py<Mcmc>) -> Result<()> {
 		for callback in &self.callbacks {
-			callback.finish(py)?;
+			callback.finish(py, mcmc.clone_ref(py))?;
 		}
 		Ok(())
 	}
