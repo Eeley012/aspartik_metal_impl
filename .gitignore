@@ -22,3 +22,14 @@ flamegraph.svg
 
 # JavaScript
 node_modules/
+
+# Working notes
+NOTES.md
+TEST.md
+.clang-format
+
+# macOS
+.DS_Store
+
+# Build artifacts
+*.dSYM/
