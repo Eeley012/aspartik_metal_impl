@@ -327,10 +327,52 @@ impl PyCudaLikelihood {
 
 likelihood_methods!(PyCudaLikelihood);
 
+/// Likelihood calculations on Apple Silicon graphics core.
+#[cfg(target_os = "macos")]
+use metal::MetalLikelihood;
+
+#[cfg(target_os = "macos")]
+#[pyclass(name = "MetalLikelihood", module = "aspartik.b3.likelihoods", frozen)]
+pub struct PyMetalLikelihood {
+	inner: Mutex<GenericLikelihood<4, f64, MetalLikelihood>>,
+}
+
+#[cfg(target_os = "macos")]
+#[pymethods]
+impl PyMetalLikelihood {
+	#[new]
+	#[pyo3(signature = (msa, substitution, clock, tree, scale_ln = 30))]
+	fn new(
+		msa: Py<PyMsa>,
+		substitution: PySubstitution4,
+		clock: Py<PyClock>,
+		tree: Py<PyTree>,
+		scale_ln: u32,
+	) -> Result<Self> {
+		let (leaves, weights) = deduplicate(msa.get());
+		let calculator =
+			MetalLikelihood::new(weights, leaves, scale_ln)?;
+		let generic = GenericLikelihood::new(
+			calculator,
+			substitution,
+			clock,
+			tree,
+		)?;
+		Ok(Self {
+			inner: Mutex::new(generic),
+		})
+	}
+}
+
+#[cfg(target_os = "macos")]
+likelihood_methods!(PyMetalLikelihood);
+
 #[derive(FromPyObject)]
 pub enum PyLikelihood {
 	Cpu(Py<PyCpu4Likelihood>),
 	Cuda(Py<PyCudaLikelihood>),
+	#[cfg(target_os = "macos")]
+	Metal(Py<PyMetalLikelihood>),
 	Hetero(Py<PyHeteroLikelihood>),
 }
 
@@ -343,6 +385,8 @@ impl<'py> IntoPyObject<'py> for PyLikelihood {
 		Ok(match self {
 			Self::Cpu(l) => l.into_bound(py).into_any(),
 			Self::Cuda(l) => l.into_bound(py).into_any(),
+			#[cfg(target_os = "macos")]
+			Self::Metal(l) => l.into_bound(py).into_any(),
 			Self::Hetero(l) => l.into_bound(py).into_any(),
 		})
 	}
@@ -353,6 +397,8 @@ impl PyLikelihood {
 		match self {
 			Self::Cpu(l) => Self::Cpu(l.clone_ref(py)),
 			Self::Cuda(l) => Self::Cuda(l.clone_ref(py)),
+			#[cfg(target_os = "macos")]
+			Self::Metal(l) => Self::Metal(l.clone_ref(py)),
 			Self::Hetero(l) => Self::Hetero(l.clone_ref(py)),
 		}
 	}
@@ -361,6 +407,8 @@ impl PyLikelihood {
 		match self {
 			Self::Cpu(l) => l.get().likelihood(),
 			Self::Cuda(l) => l.get().likelihood(),
+			#[cfg(target_os = "macos")]
+			Self::Metal(l) => l.get().likelihood(),
 			Self::Hetero(l) => l.get().likelihood(),
 		}
 	}
@@ -369,6 +417,8 @@ impl PyLikelihood {
 		match self {
 			Self::Cpu(l) => l.get().accept(),
 			Self::Cuda(l) => l.get().accept(),
+			#[cfg(target_os = "macos")]
+			Self::Metal(l) => l.get().accept(),
 			Self::Hetero(l) => l.get().accept(),
 		}
 	}
@@ -377,6 +427,8 @@ impl PyLikelihood {
 		match self {
 			Self::Cpu(l) => l.get().reject(),
 			Self::Cuda(l) => l.get().reject(),
+			#[cfg(target_os = "macos")]
+			Self::Metal(l) => l.get().reject(),
 			Self::Hetero(l) => l.get().reject(),
 		}
 	}
@@ -385,6 +437,8 @@ impl PyLikelihood {
 		match self {
 			Self::Cpu(l) => l.get().num_patterns(),
 			Self::Cuda(l) => l.get().num_patterns(),
+			#[cfg(target_os = "macos")]
+			Self::Metal(l) => l.get().num_patterns(),
 			Self::Hetero(l) => l.get().num_patterns(),
 		}
 	}
@@ -393,6 +447,8 @@ impl PyLikelihood {
 		match self {
 			Self::Cpu(l) => l.get().pattern_likelihoods(),
 			Self::Cuda(l) => l.get().pattern_likelihoods(),
+			#[cfg(target_os = "macos")]
+			Self::Metal(_l) => todo!(),
 			Self::Hetero(_l) => todo!(),
 		}
 	}

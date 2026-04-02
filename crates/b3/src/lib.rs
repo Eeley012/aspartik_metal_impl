@@ -28,6 +28,10 @@ pub mod pymodule {
 		PyCpu4Likelihood, PyCudaLikelihood, PyHeteroLikelihood,
 	};
 
+	#[cfg(target_os = "macos")]
+	#[pymodule_export]
+	use likelihood::PyMetalLikelihood;
+
 	#[pymodule_export]
 	use mcmc::Mcmc;
 	#[pymodule_export]
