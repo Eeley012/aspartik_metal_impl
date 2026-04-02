@@ -20,7 +20,7 @@ const METAL_SRC: &str = include_str!("kernels.metal");
 
 pub struct MetalLikelihood {
 	#[allow(dead_code)]
-	device: Device, // device is needed anyway
+	device: Device, // kept alive to prevent Metal resource invalidation
 	queue: CommandQueue,
 
 	propose_fn: ComputePipelineState,
@@ -85,7 +85,7 @@ impl Calculator<4, f64> for MetalLikelihood {
 				.flat_map(|&(l, r)| [l as u32, r as u32])
 				.collect();
 
-			// filling shared beffers
+			// fill shared buffers
 			unsafe {
 				std::ptr::copy_nonoverlapping(
 					nodes.as_ptr() as *const u32,
@@ -411,7 +411,7 @@ impl MetalLikelihood {
 			MTLResourceOptions::StorageModeShared,
 		);
 
-		// константы
+		// function constants
 		let fcv = FunctionConstantValues::new();
 		let num_patterns_u32 = num_patterns as u32;
 		fcv.set_constant_value_with_name(
@@ -441,7 +441,7 @@ impl MetalLikelihood {
 			"SCALE_MULT",
 		);
 
-		// код шейдеров и кернелы
+		// compile shaders and create pipelines
 		let library = device
 			.new_library_with_source(
 				METAL_SRC,
