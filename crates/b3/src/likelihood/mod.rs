@@ -15,8 +15,9 @@ use data::{DnaNucleotide, Msa, PyMsa, seq::Character};
 
 mod cpu;
 mod cuda;
-mod metal;
 mod hetero;
+#[cfg(target_os = "macos")]
+mod metal;
 
 use cpu::CpuLikelihood;
 use cuda::CudaLikelihood;
