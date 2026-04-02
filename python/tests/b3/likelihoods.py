@@ -28,3 +28,35 @@ def test_cpu(rng: RNG):
                 likelihood.accept()
             case 2:
                 likelihood.reject()
+
+try:                                                                                                           
+    from aspartik.b3.likelihoods import MetalLikelihood                                                        
+except ImportError:                                                                                            
+    MetalLikelihood = None                                                                                     
+                                                                                                                 
+                                                                                                                 
+def test_metal(rng: RNG):                                                                                      
+    if MetalLikelihood is None:
+        return                                                                                                 
+
+    msa = read_msa_from_fasta("data/alignments/apes.fasta")                                                    
+                
+    tree = Tree(msa.sequence_names(), rng)
+
+    likelihood = MetalLikelihood(                                                                              
+        msa=msa,
+        substitution=HKY(RealVector(0.1, 0.2, 0.3, 0.4), Real(2.0)),                                           
+        clock=Clock.Strict(Real(1.0)),
+        tree=tree,                                                                                             
+    )
+                                                                                                                
+    assert likelihood.num_patterns() == 69
+
+    for _ in range(1000):
+        match rng.random_int(0, 3):
+            case 0:
+                likelihood.likelihood()
+            case 1:
+                likelihood.accept()                                                                            
+            case 2:
+                likelihood.reject()
