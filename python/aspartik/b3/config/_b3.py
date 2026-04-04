@@ -4,6 +4,10 @@ from typing import Literal, Optional
 from aspartik.b3 import MCMC, Clock
 from aspartik.b3.callbacks import Timer, TraceWriter
 from aspartik.b3.likelihoods import CPU4Likelihood, CUDALikelihood
+try:
+    from aspartik.b3.likelihoods import MetalLikelihood
+except ImportError:
+    MetalLikelihood = None
 from aspartik.b3.loggers import PrintLogger
 from aspartik.b3.operators import (
     BeastNarrowExchange,
@@ -190,6 +194,12 @@ def b3_config(
             )
         case "cuda":
             likelihood = CUDALikelihood(
+                msa=msa, substitution=sub_model, clock=clock, tree=tree
+            )
+        case "metal":
+            if MetalLikelihood is None:
+                raise RuntimeError("MetalLikelihood is not available on this platform")
+            likelihood = MetalLikelihood(
                 msa=msa, substitution=sub_model, clock=clock, tree=tree
             )
 
