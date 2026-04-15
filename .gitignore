@@ -24,9 +24,15 @@ flamegraph.svg
 node_modules/
 
 # Working notes
-NOTES.md
-TEST.md
+working_data/
 .clang-format
+
+# IDE
+.vscode/
+
+# Tools
+.pytest_cache/
+.github/
 
 # macOS
 .DS_Store
