@@ -44,6 +44,10 @@ pub struct MetalLikelihood {
 
 	num_patterns: u32,
 	num_updated_nodes: u32,
+
+	decision: Option<bool>,
+	num_updated_nodes_prev: u32,
+	nodes_prev: Buffer,
 }
 
 impl Calculator<4, f64> for MetalLikelihood {
@@ -104,10 +108,45 @@ impl Calculator<4, f64> for MetalLikelihood {
 					tms_f32.len(),
 				);
 			}
-			let leaves_end = leaves_end as u32; // mut if add leaves_update()
+			let leaves_end = leaves_end as u32;
 			let internals_start = leaves_end;
 
 			let cmd_buffer = self.queue.new_command_buffer();
+
+			// ==== managing copy_projections logic from previous iteration ====
+			if let Some(decision) = self.decision {
+				let blit =
+					cmd_buffer.new_blit_command_encoder();
+				if decision {
+					blit.copy_from_buffer(
+						&self.scale_sums,
+						0,
+						&self.scale_sums_backup,
+						0,
+						(self.num_patterns as u64)
+							* mem::size_of::<u32>()
+								as u64,
+					);
+				} else {
+					blit.copy_from_buffer(
+						&self.scale_sums_backup,
+						0,
+						&self.scale_sums,
+						0,
+						(self.num_patterns as u64)
+							* mem::size_of::<u32>()
+								as u64,
+					);
+				}
+				blit.end_encoding();
+
+				self.copy_projections(decision, &cmd_buffer)?;
+
+				self.decision = None;
+			}
+
+			// ==== ======================================================= ====
+
 			self.update_all(
 				leaves_end,
 				internals_start,
@@ -156,53 +195,25 @@ impl Calculator<4, f64> for MetalLikelihood {
 	}
 
 	fn accept(&mut self) -> Result<()> {
-		autoreleasepool(|| {
-			let cmd_buffer = self.queue.new_command_buffer();
-			let blit = cmd_buffer.new_blit_command_encoder();
-			blit.copy_from_buffer(
-				&self.scale_sums,
-				0,
-				&self.scale_sums_backup,
-				0,
-				(self.num_patterns as u64)
-					* mem::size_of::<u32>() as u64,
-			);
-			blit.end_encoding();
+		self.decision = Some(true);
 
-			self.copy_projections(true, &cmd_buffer)?;
+		std::mem::swap(&mut self.nodes, &mut self.nodes_prev);
 
-			cmd_buffer.commit();
-			cmd_buffer.wait_until_completed();
+		self.num_updated_nodes_prev = self.num_updated_nodes;
+		self.num_updated_nodes = 0;
 
-			self.num_updated_nodes = 0;
-
-			Ok(())
-		})
+		Ok(())
 	}
 
 	fn reject(&mut self) -> Result<()> {
-		autoreleasepool(|| {
-			let cmd_buffer = self.queue.new_command_buffer();
-			let blit = cmd_buffer.new_blit_command_encoder();
-			blit.copy_from_buffer(
-				&self.scale_sums_backup,
-				0,
-				&self.scale_sums,
-				0,
-				(self.num_patterns as u64)
-					* mem::size_of::<u32>() as u64,
-			);
-			blit.end_encoding();
+		self.decision = Some(false);
 
-			self.copy_projections(false, &cmd_buffer)?;
+		std::mem::swap(&mut self.nodes, &mut self.nodes_prev);
 
-			cmd_buffer.commit();
-			cmd_buffer.wait_until_completed();
+		self.num_updated_nodes_prev = self.num_updated_nodes;
+		self.num_updated_nodes = 0;
 
-			self.num_updated_nodes = 0;
-
-			Ok(())
-		})
+		Ok(())
 	}
 
 	fn num_patterns(&self) -> usize {
@@ -321,14 +332,16 @@ impl MetalLikelihood {
 			encoder.set_buffer(2, Some(&self.scales_backup), 0);
 			encoder.set_buffer(3, Some(&self.scales), 0);
 		}
-		encoder.set_buffer(4, Some(&self.nodes), 0);
+		// ==== uses nodes and num_updated_nodes saved in advance from prev iteraction ====
+		encoder.set_buffer(4, Some(&self.nodes_prev), 0);
 		// configurations
 		let num_groups = (self.num_patterns as u64).div_ceil(128);
 		let grid_cfg = MTLSize::new(
 			num_groups,
-			(self.num_updated_nodes + 1) as u64,
+			(self.num_updated_nodes_prev + 1) as u64,
 			1,
 		);
+		// ==== ====================================================================== ====
 		let group_cfg = MTLSize::new(128, 1, 1);
 		encoder.dispatch_thread_groups(grid_cfg, group_cfg);
 		encoder.end_encoding();
@@ -478,6 +491,13 @@ impl MetalLikelihood {
 				anyhow!("copy_projections pipeline: {e}")
 			})?;
 
+		// ==== saved argument for copy_projections from prev iteraction ====
+		let nodes_prev = device.new_buffer(
+			(num_nodes * mem::size_of::<u32>()) as u64,
+			MTLResourceOptions::StorageModeShared,
+		);
+		// ==== ======================================================== ====
+
 		Ok(Self {
 			device,
 			queue,
@@ -503,6 +523,10 @@ impl MetalLikelihood {
 
 			num_patterns: num_patterns as u32,
 			num_updated_nodes: 0,
+
+			decision: None,
+			num_updated_nodes_prev: 0,
+			nodes_prev,
 		})
 	}
 }
