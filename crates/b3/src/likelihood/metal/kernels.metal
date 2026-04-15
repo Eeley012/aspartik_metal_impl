@@ -27,9 +27,7 @@ kernel void propose(device const uchar* leaves [[buffer(0)]],
 
                     uint global_id [[thread_position_in_grid]],
                     uint tile [[quadgroup_index_in_threadgroup]],
-                    uint sub [[thread_index_in_quadgroup]])
-
-{
+                    uint sub [[thread_index_in_quadgroup]]) {
   uint pattern = global_id / 4;
   if (pattern >= NUM_PATTERNS) {
     return;
@@ -37,7 +35,7 @@ kernel void propose(device const uchar* leaves [[buffer(0)]],
 
   for (uint i = 0; i < leaves_end; i++) {
     uchar leaf = leaves[id(nodes[i], pattern)];
-    float projection{};
+    float projection = 0.0f;
     float4 t_row = transitions[tid(i, sub)];
     if (leaf & 0b0001) {
       projection += t_row.x;
@@ -51,7 +49,13 @@ kernel void propose(device const uchar* leaves [[buffer(0)]],
     if (leaf & 0b1000) {
       projection += t_row.w;
     }
-    projections[id(nodes[i], pattern)][sub] = projection;
+
+    float4 assembled_projection =
+        float4(quad_broadcast(projection, 0), quad_broadcast(projection, 1),
+               quad_broadcast(projection, 2), quad_broadcast(projection, 3));
+    if (sub == 0) {
+      projections[id(nodes[i], pattern)] = assembled_projection;
+    }
   }
 
   uint scale_sum = scale_sums[pattern];
@@ -64,10 +68,12 @@ kernel void propose(device const uchar* leaves [[buffer(0)]],
 
     float sub_likelihood = projections[id(left, pattern)][sub] *
                            projections[id(right, pattern)][sub];
+
     bool should_scale = quad_all(sub_likelihood < SCALE_THRESHOLD);
     if (should_scale) {
       sub_likelihood *= SCALE_MULT;
     }
+
     if (sub == 0 && should_scale != old_scale) {
       scales[scale_id] = should_scale;
       if (old_scale == 0) {
@@ -76,12 +82,21 @@ kernel void propose(device const uchar* leaves [[buffer(0)]],
         scale_sum -= SCALE_LN;
       }
     }
+
     float4 likelihood = float4(
-        quad_shuffle(sub_likelihood, 0), quad_shuffle(sub_likelihood, 1),
-        quad_shuffle(sub_likelihood, 2), quad_shuffle(sub_likelihood, 3));
+        quad_broadcast(sub_likelihood, 0), quad_broadcast(sub_likelihood, 1),
+        quad_broadcast(sub_likelihood, 2), quad_broadcast(sub_likelihood, 3));
+
     float projection = dot(transitions[tid(i, sub)], likelihood);
-    projections[id(current, pattern)][sub] = projection;
+
+    float4 assembled_final =
+        float4(quad_broadcast(projection, 0), quad_broadcast(projection, 1),
+               quad_broadcast(projection, 2), quad_broadcast(projection, 3));
+    if (sub == 0) {
+      projections[id(current, pattern)] = assembled_final;
+    }
   }
+
   if (sub == 0) {
     scale_sums[pattern] = scale_sum;
   }
