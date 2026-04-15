@@ -52,17 +52,13 @@ def test_compare_likelihood():
     if cuda_calculator:
         calculators.insert(0, cuda_calculator)
 
-    try:                                                                                                           
-        metal_calculator = MetalLikelihood(                                                                        
-          msa=msa,                                                                                               
-          substitution=HKY(frequencies, kappa),                                                                  
-          clock=Clock.Strict(clock_rate),                                                                        
-          tree=tree,
-        )                                                                                                          
-    except Exception:                                                                                            
-        metal_calculator = None
-
-    if metal_calculator:
+    if MetalLikelihood is not None:
+        metal_calculator = MetalLikelihood(
+            msa=msa,
+            substitution=HKY(frequencies, kappa),
+            clock=Clock.Strict(clock_rate),
+            tree=tree,
+        )
         calculators.insert(0, metal_calculator)
 
     compare_verify_run(
