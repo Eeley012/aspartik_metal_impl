@@ -1170,8 +1170,7 @@ dependencies = [
 [[package]]
 name = "serde_verbatim"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4c92f479a1bb747473852ef3257b78fa188791fec4e3c6cb22ec8af50dba098"
+source = "git+https://github.com/kaathewisegit/verbatim?tag=v0.1.1#417fe886f923f27a34c95848c0c605169baf6bbb"
 dependencies = [
  "serde_core",
 ]

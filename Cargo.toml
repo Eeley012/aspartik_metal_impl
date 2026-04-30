@@ -49,7 +49,7 @@ rand = { version = "0.10.0", default-features = false }
 rand_pcg = "0.10.0"
 serde = "1.0"
 serde_json = "1.0"
-serde_verbatim = { version = "0.1.1", default-features = false }
+serde_verbatim = { git = "https://github.com/kaathewisegit/verbatim", tag = "v0.1.1", default-features = false }
 thiserror = "2.0"
 
 b3 = { version = "0.1.0-alpha.10", path = "crates/b3" }
