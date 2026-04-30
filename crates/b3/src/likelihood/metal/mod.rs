@@ -20,7 +20,7 @@ const METAL_SRC: &str = include_str!("kernels.metal");
 
 pub struct MetalLikelihood {
 	#[allow(dead_code)]
-	device: Device, // kept alive to prevent Metal resource invalidation
+	device: Device,
 	queue: CommandQueue,
 
 	propose_fn: ComputePipelineState,
@@ -89,15 +89,28 @@ impl Calculator<4, f64> for MetalLikelihood {
 				.flat_map(|&(l, r)| [l as u32, r as u32])
 				.collect();
 
-			// fill shared buffers
+			// SAFETY:
+			// - destination MTLBuffers were created in `new()` according to
+			//   `num_nodes`, `num_edges`, `num_edges`
+			//	 which represent max possible sizes of source arrays,
+			//	 so they never exceed that
+			//
+			// - `Vec::as_ptr()` is aligned for its element type,
+			//   and Metal's `contents()` is aligned, for 16 kB,
+			//	 which covers all types used here
+			//
+			// - heap and Metal buffer cannot overlap (disjoint allocations)
+			//
+			// - no data races between GPU and CPU are possible,
+			//	 GPU stays still here
 			unsafe {
 				std::ptr::copy_nonoverlapping(
-					nodes.as_ptr() as *const u32,
+					nodes.as_ptr(),
 					self.nodes.contents() as *mut u32,
 					nodes.len(),
 				);
 				std::ptr::copy_nonoverlapping(
-					children.as_ptr() as *const u32,
+					children.as_ptr(),
 					self.children.contents() as *mut u32,
 					children.len(),
 				);
@@ -113,7 +126,6 @@ impl Calculator<4, f64> for MetalLikelihood {
 
 			let cmd_buffer = self.queue.new_command_buffer();
 
-			// ==== managing copy_projections logic from previous iteration ====
 			if let Some(decision) = self.decision {
 				let blit =
 					cmd_buffer.new_blit_command_encoder();
@@ -123,7 +135,7 @@ impl Calculator<4, f64> for MetalLikelihood {
 						0,
 						&self.scale_sums_backup,
 						0,
-						(self.num_patterns as u64)
+						u64::from(self.num_patterns)
 							* mem::size_of::<u32>()
 								as u64,
 					);
@@ -133,24 +145,22 @@ impl Calculator<4, f64> for MetalLikelihood {
 						0,
 						&self.scale_sums,
 						0,
-						(self.num_patterns as u64)
+						u64::from(self.num_patterns)
 							* mem::size_of::<u32>()
 								as u64,
 					);
 				}
 				blit.end_encoding();
 
-				self.copy_projections(decision, &cmd_buffer)?;
+				self.copy_projections(decision, cmd_buffer)?;
 
 				self.decision = None;
 			}
 
-			// ==== ======================================================= ====
-
 			self.update_all(
 				leaves_end,
 				internals_start,
-				&cmd_buffer,
+				cmd_buffer,
 			)?;
 
 			let root = nodes.last().unwrap();
@@ -161,11 +171,21 @@ impl Calculator<4, f64> for MetalLikelihood {
 					root_children.1 as u32,
 				),
 				frequencies_f32,
-				&cmd_buffer,
+				cmd_buffer,
 			)?;
 			cmd_buffer.commit();
 			cmd_buffer.wait_until_completed();
 
+			// SAFETY:
+			// - source MTLBuffer was created in `new()` to fit
+			//   `num_patterns` of f32 so read area is valid
+			// - Metal's `contents()` is aligned, for 16 kB,
+			//	 which covers f32 alignment
+			// - `cmd_buffer.wait_until_completed()` above
+			//   stopped and confirmed the GPU writing;
+			//   all arrays cells are initialized in `update_likelihoods`
+			// - no other code touches the
+			//   buffer while this slice lives (until the end of function)
 			let likelihoods: &[f32] = unsafe {
 				std::slice::from_raw_parts(
 					self.likelihoods.contents()
@@ -173,6 +193,16 @@ impl Calculator<4, f64> for MetalLikelihood {
 					self.num_patterns as usize,
 				)
 			};
+			// SAFETY:
+			// - source MTLBuffer was created in `new()` to fit
+			//   `num_patterns` of u32 so read area is valid
+			// - Metal's `contents()` is aligned, for 16 kB,
+			//	 which covers u32 alignment
+			// - `cmd_buffer.wait_until_completed()` above
+			//   stopped and confirmed the GPU writing;
+			//   all arrays cells are populated by GPU kernels
+			// - no other code touches the
+			//   buffer while this slice lives (until the end of function)
 			let scale_sums: &[u32] = unsafe {
 				std::slice::from_raw_parts(
 					self.scale_sums.contents()
@@ -204,7 +234,6 @@ impl Calculator<4, f64> for MetalLikelihood {
 
 		Ok(())
 	}
-
 	fn reject(&mut self) -> Result<()> {
 		self.decision = Some(false);
 
@@ -230,7 +259,6 @@ impl MetalLikelihood {
 	) -> Result<()> {
 		let encoder = cmd_buffer.new_compute_command_encoder();
 		encoder.set_compute_pipeline_state(&self.propose_fn);
-		// buffers
 		encoder.set_buffer(0, Some(&self.leaves), 0);
 		encoder.set_buffer(1, Some(&self.projections), 0);
 		encoder.set_buffer(2, Some(&self.scales), 0);
@@ -238,7 +266,6 @@ impl MetalLikelihood {
 		encoder.set_buffer(4, Some(&self.nodes), 0);
 		encoder.set_buffer(5, Some(&self.children), 0);
 		encoder.set_buffer(6, Some(&self.transitions), 0);
-		// scalars
 		encoder.set_bytes(
 			7,
 			mem::size_of::<u32>() as u64,
@@ -254,8 +281,8 @@ impl MetalLikelihood {
 			mem::size_of::<u32>() as u64,
 			&internals_start as *const u32 as *const c_void,
 		);
-		// configurations
-		let num_groups = (self.num_patterns as u64 * 4).div_ceil(64);
+		let num_groups =
+			(u64::from(self.num_patterns) * 4).div_ceil(64);
 		let grid_cfg = MTLSize::new(num_groups, 1, 1);
 		let group_cfg = MTLSize::new(64, 1, 1);
 		encoder.dispatch_thread_groups(grid_cfg, group_cfg);
@@ -271,12 +298,10 @@ impl MetalLikelihood {
 	) -> Result<()> {
 		let encoder = cmd_buffer.new_compute_command_encoder();
 		encoder.set_compute_pipeline_state(&self.update_likelihoods_fn);
-		// buffers
 		encoder.set_buffer(0, Some(&self.projections), 0);
 		encoder.set_buffer(1, Some(&self.likelihoods), 0);
 		encoder.set_buffer(2, Some(&self.scales), 0);
 		encoder.set_buffer(3, Some(&self.scale_sums), 0);
-		// scalars
 		encoder.set_bytes(
 			4,
 			mem::size_of::<u32>() as u64,
@@ -297,8 +322,7 @@ impl MetalLikelihood {
 			mem::size_of::<Row>() as u64,
 			&frequencies as *const Row as *const c_void,
 		);
-		// configurations
-		let num_groups = (self.num_patterns as u64).div_ceil(64);
+		let num_groups = u64::from(self.num_patterns).div_ceil(64);
 		let grid_cfg = MTLSize::new(num_groups, 1, 1);
 		let group_cfg = MTLSize::new(64, 1, 1);
 		encoder.dispatch_thread_groups(grid_cfg, group_cfg);
@@ -312,7 +336,6 @@ impl MetalLikelihood {
 	) -> Result<()> {
 		let encoder = cmd_buffer.new_compute_command_encoder();
 		encoder.set_compute_pipeline_state(&self.copy_projections_fn);
-		// buffers and scalars
 		if accept {
 			encoder.set_buffer(0, Some(&self.projections), 0);
 			encoder.set_buffer(
@@ -332,16 +355,13 @@ impl MetalLikelihood {
 			encoder.set_buffer(2, Some(&self.scales_backup), 0);
 			encoder.set_buffer(3, Some(&self.scales), 0);
 		}
-		// ==== uses nodes and num_updated_nodes saved in advance from prev iteraction ====
 		encoder.set_buffer(4, Some(&self.nodes_prev), 0);
-		// configurations
-		let num_groups = (self.num_patterns as u64).div_ceil(128);
+		let num_groups = u64::from(self.num_patterns).div_ceil(128);
 		let grid_cfg = MTLSize::new(
 			num_groups,
-			(self.num_updated_nodes_prev + 1) as u64,
+			u64::from(self.num_updated_nodes_prev + 1),
 			1,
 		);
-		// ==== ====================================================================== ====
 		let group_cfg = MTLSize::new(128, 1, 1);
 		encoder.dispatch_thread_groups(grid_cfg, group_cfg);
 		encoder.end_encoding();
@@ -352,23 +372,19 @@ impl MetalLikelihood {
 		leaves: Vec<u8>,
 		scale_ln: u32,
 	) -> Result<Self> {
-		// GPU objects
 		let device = Device::system_default()
 			.ok_or_else(|| anyhow!("Metal GPU not found"))?;
 		let queue = device.new_command_queue();
 
-		// scaling parameters
 		let scale_threshold = (-(scale_ln as f32)).exp();
 		let scale_mult = (scale_ln as f32).exp();
 
-		// scalars
 		let num_patterns = pattern_weights.len();
 		let num_leaves = leaves.len() / num_patterns;
 		let num_internals = num_leaves - 1;
 		let num_nodes = num_leaves + num_internals;
 		let num_edges = num_internals * 2;
 
-		// buffers
 		let leaves = device.new_buffer_with_data(
 			leaves.as_ptr() as *const c_void,
 			(num_leaves * num_patterns * mem::size_of::<u8>())
@@ -424,7 +440,6 @@ impl MetalLikelihood {
 			MTLResourceOptions::StorageModeShared,
 		);
 
-		// function constants
 		let fcv = FunctionConstantValues::new();
 		let num_patterns_u32 = num_patterns as u32;
 		fcv.set_constant_value_with_name(
@@ -454,7 +469,6 @@ impl MetalLikelihood {
 			"SCALE_MULT",
 		);
 
-		// compile shaders and create pipelines
 		let library = device
 			.new_library_with_source(
 				METAL_SRC,
@@ -470,7 +484,6 @@ impl MetalLikelihood {
 		let copy_projections_function = library
 			.get_function("copy_projections", Some(fcv))
 			.map_err(|e| anyhow!(e))?;
-
 		let propose_fn = device
 			.new_compute_pipeline_state_with_function(
 				&propose_function,
@@ -491,12 +504,10 @@ impl MetalLikelihood {
 				anyhow!("copy_projections pipeline: {e}")
 			})?;
 
-		// ==== saved argument for copy_projections from prev iteraction ====
 		let nodes_prev = device.new_buffer(
 			(num_nodes * mem::size_of::<u32>()) as u64,
 			MTLResourceOptions::StorageModeShared,
 		);
-		// ==== ======================================================== ====
 
 		Ok(Self {
 			device,

@@ -10,24 +10,22 @@ constant float SCALE_MULT [[function_constant(4)]];
 inline uint id(uint edge, uint pattern) {
   return edge * NUM_PATTERNS + pattern;
 }
-
 inline uint tid(uint node, uint sub) { return node * 4 + sub; }
 
-kernel void propose(device const uchar* leaves [[buffer(0)]],
-                    device float4* projections [[buffer(1)]],
-                    device uchar* scales [[buffer(2)]],
-                    device uint* scale_sums [[buffer(3)]],
-                    device const uint* nodes [[buffer(4)]],
-                    device const uint* children [[buffer(5)]],
-                    device const float4* transitions [[buffer(6)]],
+kernel void propose(
+    device const uchar* leaves [[buffer(0)]],
+    device float4* projections [[buffer(1)]],
+    device uchar* scales [[buffer(2)]], device uint* scale_sums [[buffer(3)]],
+    device const uint* nodes [[buffer(4)]],
+    device const uint* children [[buffer(5)]],
+    device const float4* transitions [[buffer(6)]],
 
-                    constant uint& num_updated_nodes [[buffer(7)]],
-                    constant uint& leaves_end [[buffer(8)]],
-                    constant uint& internals_start [[buffer(9)]],
-
-                    uint global_id [[thread_position_in_grid]],
-                    uint tile [[quadgroup_index_in_threadgroup]],
-                    uint sub [[thread_index_in_quadgroup]]) {
+    constant uint& num_updated_nodes [[buffer(7)]],
+    constant uint& leaves_end [[buffer(8)]],
+    constant uint& internals_start [[buffer(9)]],
+    uint global_id [[thread_position_in_grid]],
+    uint tile [[quadgroup_index_in_threadgroup]],
+    uint sub [[thread_index_in_quadgroup]]) {
   uint pattern = global_id / 4;
   if (pattern >= NUM_PATTERNS) {
     return;
@@ -65,7 +63,6 @@ kernel void propose(device const uchar* leaves [[buffer(0)]],
     uint current = nodes[i];
     uint scale_id = id(current, pattern);
     uint old_scale = scales[scale_id];
-
     float sub_likelihood = projections[id(left, pattern)][sub] *
                            projections[id(right, pattern)][sub];
 
@@ -92,27 +89,27 @@ kernel void propose(device const uchar* leaves [[buffer(0)]],
     float4 assembled_final =
         float4(quad_broadcast(projection, 0), quad_broadcast(projection, 1),
                quad_broadcast(projection, 2), quad_broadcast(projection, 3));
+
     if (sub == 0) {
       projections[id(current, pattern)] = assembled_final;
     }
   }
-
   if (sub == 0) {
     scale_sums[pattern] = scale_sum;
   }
 }
 
-kernel void update_likelihoods(device const float4* projections [[buffer(0)]],
-                               device float* likelihoods [[buffer(1)]],
-                               device uchar* scales [[buffer(2)]],
-                               device uint* scale_sums [[buffer(3)]],
+kernel void update_likelihoods(
+    device const float4* projections [[buffer(0)]],
+    device float* likelihoods [[buffer(1)]],
+    device uchar* scales [[buffer(2)]], device uint* scale_sums [[buffer(3)]],
 
-                               constant uint& root [[buffer(4)]],
-                               constant uint& left_child [[buffer(5)]],
-                               constant uint& right_child [[buffer(6)]],
-                               constant float4& frequencies [[buffer(7)]],
+    constant uint& root [[buffer(4)]],
+    constant uint& left_child [[buffer(5)]],
+    constant uint& right_child [[buffer(6)]],
+    constant float4& frequencies [[buffer(7)]],
 
-                               uint pattern [[thread_position_in_grid]]) {
+    uint pattern [[thread_position_in_grid]]) {
   if (pattern >= NUM_PATTERNS) {
     return;
   }
@@ -144,6 +141,7 @@ kernel void copy_projections(device const float4* projections_src [[buffer(0)]],
   }
   uint node = global_id.y;
   uint proj_id = id(nodes[node], pattern);
+
   projections_dst[proj_id] = projections_src[proj_id];
   scales_dst[proj_id] = scales_src[proj_id];
 }

@@ -1,13 +1,10 @@
 from collections.abc import Sequence
 from typing import Literal, Optional
 
+import aspartik.b3.likelihoods as _likelihoods
 from aspartik.b3 import MCMC, Clock
 from aspartik.b3.callbacks import Timer, TraceWriter
 from aspartik.b3.likelihoods import CPU4Likelihood, CUDALikelihood
-try:
-    from aspartik.b3.likelihoods import MetalLikelihood
-except ImportError:
-    MetalLikelihood = None
 from aspartik.b3.loggers import PrintLogger
 from aspartik.b3.operators import (
     BeastNarrowExchange,
@@ -44,6 +41,8 @@ from aspartik.stats.distributions import (
 )
 
 from ._shared import CalculatorKind, SubstitutionModel, TreePrior
+
+MetalLikelihood = getattr(_likelihoods, "MetalLikelihood", None)
 
 
 def b3_config(

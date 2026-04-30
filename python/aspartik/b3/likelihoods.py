@@ -9,6 +9,7 @@ from .._aspartik_rust_impl._b3_rust_impl import (
     CUDALikelihood as CUDALikelihood,
     HeteroLikelihood as HeteroLikelihood,
 )
+
 try:
     from .._aspartik_rust_impl._b3_rust_impl import (
         MetalLikelihood as MetalLikelihood,

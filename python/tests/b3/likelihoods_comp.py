@@ -1,18 +1,14 @@
 from utils.compare import compare_verify_run
 
+import aspartik.b3.likelihoods as _likelihoods
 from aspartik.b3 import Clock
-from aspartik.b3.likelihoods import (
-    CPU4Likelihood,
-    CUDALikelihood
-)
-try:                                                                                                           
-    from aspartik.b3.likelihoods import MetalLikelihood                                                      
-except ImportError:
-    MetalLikelihood = None
+from aspartik.b3.likelihoods import CPU4Likelihood, CUDALikelihood
 from aspartik.b3.parameters import Real, RealVector, Tree
 from aspartik.b3.substitutions import HKY
 from aspartik.io import read_msa_from_fasta
 from aspartik.rng import RNG
+
+MetalLikelihood = getattr(_likelihoods, "MetalLikelihood", None)
 
 SCALES = [3, 30, 300]
 

@@ -88,6 +88,16 @@ class CPU4Likelihood(Likelihood):
         scale_ln: int = 30,
     ): ...
 
+class MetalLikelihood(Likelihood):
+    def __init__(
+        self,
+        msa: MSA,
+        substitution: Substiution4,
+        clock: Clock,
+        tree: Tree,
+        scale_ln: int = 30,
+    ): ...
+
 class CUDALikelihood(Likelihood):
     def __init__(
         self,
