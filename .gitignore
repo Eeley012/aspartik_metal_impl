@@ -25,7 +25,6 @@ node_modules/
 
 # Working notes
 working_data/
-.clang-format
 
 # IDE
 .vscode/
